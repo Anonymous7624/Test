@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Production: run behind Cloudflare Tunnel (cloudflared) or a reverse proxy so the API is reachable
 # from the Next.js frontend and from Telegram webhooks without exposing raw ports. Point tunnel
-# public hostname to this Uvicorn process (e.g. localhost:8000) and set CORS_ORIGINS to the tunnel URL.
+# public hostname to this Uvicorn process (e.g. localhost:8000) and set BACKEND_CORS_ORIGINS to the tunnel URL.
 
 from app.config import settings
 from app.database import Base, engine
@@ -30,7 +30,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Deal Dashboard API", lifespan=lifespan)
 
-origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+origins = [o.strip() for o in settings.backend_cors_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,

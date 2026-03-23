@@ -1,4 +1,23 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api";
+/** API origin (no trailing slash). Set NEXT_PUBLIC_API_BASE_URL in .env.local for LAN dev. */
+function resolveApiBaseUrl(): string {
+  const fromBase = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "");
+  if (fromBase) return `${fromBase}/api`;
+
+  // Legacy: full URL including /api (e.g. http://host:8000/api)
+  const legacy = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "");
+  if (legacy) {
+    return legacy.endsWith("/api") ? legacy : `${legacy}/api`;
+  }
+
+  if (process.env.NODE_ENV === "development") {
+    console.warn(
+      "[api] Set NEXT_PUBLIC_API_BASE_URL in frontend/.env.local (e.g. http://192.168.1.181:8000)",
+    );
+  }
+  return "";
+}
+
+const API_BASE = resolveApiBaseUrl();
 
 export type User = {
   id: number;

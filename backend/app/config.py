@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,8 +24,11 @@ class Settings(BaseSettings):
         Path(__file__).resolve().parent.parent.parent / "config" / "categories.json"
     )
 
-    # CORS (Next.js dev server)
-    cors_origins: str = "http://localhost:3000"
+    # CORS (comma-separated). Prefer BACKEND_CORS_ORIGINS; CORS_ORIGINS is accepted for compatibility.
+    backend_cors_origins: str = Field(
+        default="http://localhost:3000,http://127.0.0.1:3000,http://192.168.1.181:3000",
+        validation_alias=AliasChoices("BACKEND_CORS_ORIGINS", "CORS_ORIGINS"),
+    )
 
 
 settings = Settings()
