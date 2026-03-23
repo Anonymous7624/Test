@@ -1,0 +1,24 @@
+{
+  "categories": [
+    {
+      "id": "general",
+      "label": "General",
+      "keywords": ["deal", "sale", "local", "bundle", "clearance"]
+    },
+    {
+      "id": "electronics",
+      "label": "Electronics",
+      "keywords": ["laptop", "gpu", "phone", "monitor", "console", "tablet", "headphones"]
+    },
+    {
+      "id": "furniture",
+      "label": "Furniture",
+      "keywords": ["desk", "chair", "sofa", "table", "shelf", "dresser", "cabinet"]
+    },
+    {
+      "id": "vehicles",
+      "label": "Vehicles",
+      "keywords": ["car", "truck", "motorcycle", "bike", "suv", "van", "parts"]
+    }
+  ]
+}
