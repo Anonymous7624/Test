@@ -1,11 +1,22 @@
+import logging
 from pathlib import Path
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+logger = logging.getLogger(__name__)
+
+# Resolve backend/.env regardless of process cwd (e.g. uvicorn run from repo root).
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent
+_ENV_FILE = _BACKEND_ROOT / ".env"
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     # Auth / JWT
     secret_key: str = "change-me-in-production"
@@ -33,5 +44,21 @@ class Settings(BaseSettings):
     # Geoapify (geocoding + boundaries on server; never expose to client beyond autocomplete key)
     geoapify_api_key: str = Field(default="", validation_alias="GEOAPIFY_API_KEY")
 
+    # Telegram Bot API (server only; users link chat via Settings UI)
+    telegram_bot_token: str = Field(default="", validation_alias="TELEGRAM_BOT_TOKEN")
+
 
 settings = Settings()
+
+
+def log_telegram_token_diagnostic() -> None:
+    """Startup-safe: confirms TELEGRAM_BOT_TOKEN without logging the full secret."""
+    t = (settings.telegram_bot_token or "").strip()
+    if not t:
+        logger.info("TELEGRAM_BOT_TOKEN: not set (env file: %s)", _ENV_FILE)
+        return
+    logger.info(
+        "TELEGRAM_BOT_TOKEN: present (prefix=%s…, length=%d)",
+        t[:4],
+        len(t),
+    )

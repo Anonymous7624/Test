@@ -1,5 +1,4 @@
 import asyncio
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -10,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # from the Next.js frontend and from Telegram webhooks without exposing raw ports. Point tunnel
 # public hostname to this Uvicorn process (e.g. localhost:8000) and set BACKEND_CORS_ORIGINS to the tunnel URL.
 
-from app.config import settings
+from app.config import log_telegram_token_diagnostic, settings
 from app.database import Base, engine
 from app.migrate_sqlite import apply_sqlite_migrations
 from app.routers import admin, auth, categories, listings, settings as settings_router, worker_control
@@ -22,7 +21,7 @@ _telegram_offset: int | None = None
 async def _telegram_poll_loop() -> None:
     global _telegram_offset
     while True:
-        if not os.getenv("TELEGRAM_BOT_TOKEN"):
+        if not (settings.telegram_bot_token or "").strip():
             await asyncio.sleep(5)
             continue
         try:
@@ -41,6 +40,7 @@ async def _telegram_poll_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    log_telegram_token_diagnostic()
     Path("data").mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
     from app.database import SessionLocal

@@ -1,15 +1,20 @@
 """
-Telegram Bot API (sendMessage). Bot token from TELEGRAM_BOT_TOKEN env only; chat from user settings.
+Telegram Bot API (sendMessage). Bot token from Settings (TELEGRAM_BOT_TOKEN); chat from user settings.
 """
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import httpx
 
+from app.config import settings
+
 TELEGRAM_API = "https://api.telegram.org"
+
+
+def _bot_token() -> str:
+    return (settings.telegram_bot_token or "").strip()
 
 
 def _send_message(bot_token: str, chat_id: str, text: str) -> tuple[bool, str | None]:
@@ -28,14 +33,14 @@ def _send_message(bot_token: str, chat_id: str, text: str) -> tuple[bool, str | 
 
 
 def send_test_message(chat_id: str) -> tuple[bool, str | None]:
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    token = _bot_token()
     if not token or not chat_id.strip():
         return False, "Missing bot token or chat id"
     return _send_message(token, chat_id.strip(), "Deal dashboard: Telegram test message OK.")
 
 
 def send_verification_success(chat_id: str) -> None:
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    token = _bot_token()
     if not token or not str(chat_id).strip():
         return
     _send_message(
@@ -52,8 +57,8 @@ def send_profit_alert(
     source_link: str,
     estimated_profit: float,
 ) -> bool:
-    """Sends alert to the given chat using TELEGRAM_BOT_TOKEN from the environment."""
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    """Sends alert to the given chat using TELEGRAM_BOT_TOKEN from app settings."""
+    token = _bot_token()
     if not token or not chat_id or not str(chat_id).strip():
         return False
     text = (
@@ -65,7 +70,7 @@ def send_profit_alert(
 
 def fetch_updates(*, offset: int | None = None, timeout: int = 0) -> tuple[list[dict[str, Any]], int | None]:
     """Long-poll Telegram updates; returns (results, next_offset)."""
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    token = _bot_token()
     if not token:
         return [], offset
     url = f"{TELEGRAM_API}/bot{token}/getUpdates"

@@ -1,10 +1,10 @@
-import os
 import secrets
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user
 from app.models import User, UserSettings
@@ -140,7 +140,7 @@ def start_telegram_verification(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> TelegramVerificationStart:
-    if not os.getenv("TELEGRAM_BOT_TOKEN"):
+    if not (settings.telegram_bot_token or "").strip():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="TELEGRAM_BOT_TOKEN is not configured on the server.",
@@ -172,7 +172,7 @@ def send_telegram_test(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Connect Telegram via verification first.",
         )
-    if not os.getenv("TELEGRAM_BOT_TOKEN"):
+    if not (settings.telegram_bot_token or "").strip():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="TELEGRAM_BOT_TOKEN is not configured on the server.",
