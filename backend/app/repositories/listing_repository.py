@@ -1,9 +1,9 @@
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import Listing
+from app.models import AlertStatus, Listing
 
 
 class ListingRepository:
@@ -29,6 +29,7 @@ class ListingRepository:
         profitable: bool,
         alert_status: str,
         found_at: datetime | None = None,
+        discovery_source: str = "live",
     ) -> Listing:
         row = Listing(
             user_id=user_id,
@@ -41,6 +42,7 @@ class ListingRepository:
             location=location,
             source_link=source_link,
             source=source,
+            discovery_source=discovery_source,
             profitable=profitable,
             alert_status=alert_status,
             found_at=found_at or datetime.utcnow(),
@@ -68,3 +70,15 @@ class ListingRepository:
         if category_slug:
             q = q.where(Listing.category_slug == category_slug)
         return list(self.db.scalars(q.limit(limit)))
+
+    def count_for_user(self, user_id: int) -> int:
+        q = select(func.count()).select_from(Listing).where(Listing.user_id == user_id)
+        return int(self.db.scalar(q) or 0)
+
+    def count_alerts_sent(self, user_id: int) -> int:
+        q = (
+            select(func.count())
+            .select_from(Listing)
+            .where(Listing.user_id == user_id, Listing.alert_status == AlertStatus.sent.value)
+        )
+        return int(self.db.scalar(q) or 0)

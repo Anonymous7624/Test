@@ -48,7 +48,13 @@ class UserSettings(Base):
     max_price: Mapped[float] = mapped_column(Float, default=10_000.0)
     telegram_chat_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     telegram_connected: Mapped[bool] = mapped_column(Boolean, default=False)
+    telegram_verify_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    telegram_verify_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     monitoring_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    monitoring_state: Mapped[str] = mapped_column(String(32), default="idle")
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    backfill_complete: Mapped[bool] = mapped_column(Boolean, default=True)
 
     user: Mapped["User"] = relationship("User", back_populates="settings")
 
@@ -69,4 +75,5 @@ class Listing(Base):
     alert_status: Mapped[str] = mapped_column(String(32), default=AlertStatus.none.value)
     source_link: Mapped[str] = mapped_column(Text)
     source: Mapped[str] = mapped_column(String(64), default="mock")
+    discovery_source: Mapped[str] = mapped_column(String(32), default="live")
     profitable: Mapped[bool] = mapped_column(Boolean, default=False, index=True)

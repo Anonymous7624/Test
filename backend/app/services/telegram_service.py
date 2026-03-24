@@ -5,6 +5,7 @@ Telegram Bot API (sendMessage). Bot token from TELEGRAM_BOT_TOKEN env only; chat
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import httpx
 
@@ -33,6 +34,17 @@ def send_test_message(chat_id: str) -> tuple[bool, str | None]:
     return _send_message(token, chat_id.strip(), "Deal dashboard: Telegram test message OK.")
 
 
+def send_verification_success(chat_id: str) -> None:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token or not str(chat_id).strip():
+        return
+    _send_message(
+        token,
+        str(chat_id).strip(),
+        "Deal dashboard: Telegram linked. You will receive profit alerts here.",
+    )
+
+
 def send_profit_alert(
     *,
     chat_id: str | None,
@@ -49,3 +61,30 @@ def send_profit_alert(
     )
     ok, _ = _send_message(token, str(chat_id).strip(), text)
     return ok
+
+
+def fetch_updates(*, offset: int | None = None, timeout: int = 0) -> tuple[list[dict[str, Any]], int | None]:
+    """Long-poll Telegram updates; returns (results, next_offset)."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        return [], offset
+    url = f"{TELEGRAM_API}/bot{token}/getUpdates"
+    params: dict[str, Any] = {"timeout": timeout}
+    if offset is not None:
+        params["offset"] = offset
+    try:
+        r = httpx.get(url, params=params, timeout=float(timeout + 25))
+        if not r.is_success:
+            return [], offset
+        data = r.json()
+        if not data.get("ok"):
+            return [], offset
+        results = data.get("result") or []
+        next_off = offset
+        for u in results:
+            uid = u.get("update_id")
+            if isinstance(uid, int):
+                next_off = uid + 1
+        return results, next_off
+    except Exception:  # noqa: BLE001
+        return [], offset

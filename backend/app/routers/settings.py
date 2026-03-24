@@ -1,4 +1,6 @@
 import os
+import secrets
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -6,10 +8,18 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.deps import get_current_user
 from app.models import User, UserSettings
-from app.schemas import TelegramTestResult, UserSettingsOut, UserSettingsUpdate
+from app.schemas import (
+    TelegramTestResult,
+    TelegramVerificationStart,
+    UserSettingsOut,
+    UserSettingsUpdate,
+    user_settings_out_from_row,
+)
 from app.services.categories_service import validate_category_id
 from app.services.location_service import LocationResolutionError, resolve_location_for_save
+from app.services.monitoring_validation import readiness_errors, validate_max_price_usd, validate_radius_miles
 from app.services.telegram_service import send_test_message
+from app.services.units import km_to_miles, miles_to_km
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -37,12 +47,22 @@ def _location_subset_changed(
     return False
 
 
+@router.get("/monitoring-readiness")
+def monitoring_readiness(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    row = _get_settings_row(db, user)
+    errs = readiness_errors(db, row)
+    return {"ready": len(errs) == 0, "errors": errs}
+
+
 @router.get("/me", response_model=UserSettingsOut)
 def get_my_settings(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> UserSettingsOut:
-    return UserSettingsOut.model_validate(_get_settings_row(db, user))
+    return user_settings_out_from_row(_get_settings_row(db, user))
 
 
 @router.put("/me", response_model=UserSettingsOut)
@@ -53,6 +73,14 @@ def update_my_settings(
 ) -> UserSettingsOut:
     row = _get_settings_row(db, user)
     data = body.model_dump(exclude_unset=True)
+    if "radius_miles" in data and data["radius_miles"] is not None:
+        validate_radius_miles(float(data["radius_miles"]))
+        data["radius_km"] = miles_to_km(float(data["radius_miles"]))
+        del data["radius_miles"]
+    elif "radius_km" in data and data["radius_km"] is not None:
+        validate_radius_miles(km_to_miles(float(data["radius_km"])))
+    if "max_price" in data and data["max_price"] is not None:
+        validate_max_price_usd(float(data["max_price"]))
     if "category_id" in data and data["category_id"] is not None:
         if not validate_category_id(data["category_id"]):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid category")
@@ -104,7 +132,32 @@ def update_my_settings(
     db.add(row)
     db.commit()
     db.refresh(row)
-    return UserSettingsOut.model_validate(row)
+    return user_settings_out_from_row(row)
+
+
+@router.post("/telegram/verification/start", response_model=TelegramVerificationStart)
+def start_telegram_verification(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> TelegramVerificationStart:
+    if not os.getenv("TELEGRAM_BOT_TOKEN"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="TELEGRAM_BOT_TOKEN is not configured on the server.",
+        )
+    row = _get_settings_row(db, user)
+    code = secrets.token_hex(4).upper()[:10]
+    exp = datetime.utcnow() + timedelta(minutes=15)
+    row.telegram_verify_code = code
+    row.telegram_verify_expires_at = exp
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return TelegramVerificationStart(
+        code=code,
+        expires_at=exp,
+        instructions='Open Telegram, open your bot, and send: /start ' + code,
+    )
 
 
 @router.post("/telegram/test", response_model=TelegramTestResult)
@@ -117,7 +170,7 @@ def send_telegram_test(
     if not cid:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Save a Telegram chat id first.",
+            detail="Connect Telegram via verification first.",
         )
     if not os.getenv("TELEGRAM_BOT_TOKEN"):
         raise HTTPException(

@@ -59,3 +59,23 @@ def apply_sqlite_migrations(engine: Engine) -> None:
                     "AND location IS NOT NULL AND TRIM(location) != ''"
                 )
             )
+
+        us_cols6 = {r[1] for r in conn.execute(text("PRAGMA table_info(user_settings)")).fetchall()}
+        for col_name, ddl in [
+            ("telegram_verify_code", "ALTER TABLE user_settings ADD COLUMN telegram_verify_code VARCHAR(64)"),
+            (
+                "telegram_verify_expires_at",
+                "ALTER TABLE user_settings ADD COLUMN telegram_verify_expires_at DATETIME",
+            ),
+            ("monitoring_state", "ALTER TABLE user_settings ADD COLUMN monitoring_state VARCHAR(32) DEFAULT 'idle'"),
+            ("last_checked_at", "ALTER TABLE user_settings ADD COLUMN last_checked_at DATETIME"),
+            ("last_error", "ALTER TABLE user_settings ADD COLUMN last_error VARCHAR(512)"),
+            ("backfill_complete", "ALTER TABLE user_settings ADD COLUMN backfill_complete BOOLEAN DEFAULT 1"),
+        ]:
+            if col_name not in us_cols6:
+                conn.execute(text(ddl))
+                us_cols6.add(col_name)
+
+        li_cols2 = {r[1] for r in conn.execute(text("PRAGMA table_info(listings)")).fetchall()}
+        if "discovery_source" not in li_cols2:
+            conn.execute(text("ALTER TABLE listings ADD COLUMN discovery_source VARCHAR(32) DEFAULT 'live'"))

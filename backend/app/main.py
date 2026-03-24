@@ -1,3 +1,5 @@
+import asyncio
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,6 +16,28 @@ from app.migrate_sqlite import apply_sqlite_migrations
 from app.routers import admin, auth, categories, listings, settings as settings_router, worker_control
 from app.seed import seed_default_admin
 
+_telegram_offset: int | None = None
+
+
+async def _telegram_poll_loop() -> None:
+    global _telegram_offset
+    while True:
+        if not os.getenv("TELEGRAM_BOT_TOKEN"):
+            await asyncio.sleep(5)
+            continue
+        try:
+            from app.database import SessionLocal
+            from app.services.telegram_updates import process_telegram_updates
+
+            db = SessionLocal()
+            try:
+                _telegram_offset = process_telegram_updates(db, _telegram_offset)
+            finally:
+                db.close()
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -27,7 +51,15 @@ async def lifespan(_: FastAPI):
     finally:
         db.close()
     apply_sqlite_migrations(engine)
-    yield
+    tg_task = asyncio.create_task(_telegram_poll_loop())
+    try:
+        yield
+    finally:
+        tg_task.cancel()
+        try:
+            await tg_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="Deal Dashboard API", lifespan=lifespan)

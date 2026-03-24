@@ -76,11 +76,12 @@ export default function ListingsPage() {
           <thead className="border-b border-zinc-800 bg-zinc-900/80 text-xs uppercase text-zinc-500">
             <tr>
               <th className="px-3 py-2">Title</th>
-              <th className="px-3 py-2">Price</th>
+              <th className="px-3 py-2">Price (USD)</th>
               <th className="px-3 py-2">Est. resale</th>
               <th className="px-3 py-2">Est. profit</th>
               <th className="px-3 py-2">Category</th>
               <th className="px-3 py-2">Location</th>
+              <th className="px-3 py-2">Source</th>
               <th className="px-3 py-2">Found</th>
               <th className="px-3 py-2">Alert</th>
               <th className="px-3 py-2">Link</th>
@@ -97,6 +98,9 @@ export default function ListingsPage() {
                 </td>
                 <td className="px-3 py-2">{r.category_slug}</td>
                 <td className="px-3 py-2">{r.location}</td>
+                <td className="px-3 py-2 text-zinc-400">
+                  {r.discovery_source === "backfill" ? "Initial backfill" : "Live monitoring"}
+                </td>
                 <td className="whitespace-nowrap px-3 py-2 text-zinc-400">
                   {new Date(r.found_at).toLocaleString()}
                 </td>
@@ -115,8 +119,12 @@ export default function ListingsPage() {
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={9} className="px-3 py-8 text-center text-zinc-500">
-                  No listings yet. Enable monitoring in Settings and run the worker.
+                <td colSpan={10} className="px-3 py-12 text-center text-zinc-500">
+                  <p className="text-sm font-medium text-zinc-400">No listings yet</p>
+                  <p className="mt-2 max-w-md text-xs text-zinc-500">
+                    Save valid settings in Settings, verify Telegram, click Run monitoring, and keep the worker process
+                    running. Matching deals appear here with USD pricing and backfill vs live labels.
+                  </p>
                 </td>
               </tr>
             )}

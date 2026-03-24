@@ -44,6 +44,7 @@ def process_batch(
     *,
     owner_user_id: int,
     telegram_chat_id: str | None,
+    discovery_source: str = "live",
 ) -> int:
     """Insert new listings; returns count inserted."""
     repo = ListingRepository(db)
@@ -76,6 +77,7 @@ def process_batch(
             profitable=est.profitable,
             alert_status=alert_status,
             found_at=datetime.utcnow(),
+            discovery_source=discovery_source,
         )
         inserted += 1
     return inserted

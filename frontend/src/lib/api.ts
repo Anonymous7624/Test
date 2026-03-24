@@ -38,11 +38,17 @@ export type UserSettings = {
   geoapify_place_id: string | null;
   boundary_context: Record<string, unknown> | null;
   radius_km: number;
+  radius_miles: number;
   category_id: string;
   max_price: number;
   telegram_chat_id: string | null;
   telegram_connected: boolean;
   monitoring_enabled: boolean;
+  monitoring_state: string;
+  last_checked_at: string | null;
+  last_error: string | null;
+  backfill_complete: boolean;
+  telegram_verify_pending: boolean;
 };
 
 export type ListingRow = {
@@ -57,6 +63,7 @@ export type ListingRow = {
   alert_status: string;
   source_link: string;
   source: string;
+  discovery_source: string;
   profitable: boolean;
 };
 
@@ -146,8 +153,16 @@ export async function workerRun(token: string) {
     method: "POST",
     headers: headers(token),
   });
-  if (!res.ok) throw new Error("Failed to start");
-  return res.json();
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { detail?: unknown } | null;
+    const d = body?.detail;
+    if (d && typeof d === "object" && d !== null && Array.isArray((d as { errors?: string[] }).errors)) {
+      throw new Error((d as { errors: string[] }).errors.join(" "));
+    }
+    if (typeof d === "string") throw new Error(d);
+    throw new Error("Failed to start monitoring");
+  }
+  return res.json() as Promise<WorkerStatusPayload>;
 }
 
 export async function workerStop(token: string) {
@@ -159,10 +174,47 @@ export async function workerStop(token: string) {
   return res.json();
 }
 
+export type WorkerStatusPayload = {
+  monitoring_enabled: boolean;
+  monitoring_state: string;
+  message: string;
+  last_checked_at: string | null;
+  listings_found_count: number;
+  alerts_sent_count: number;
+  backfill_complete: boolean;
+  last_error: string | null;
+};
+
 export async function workerStatus(token: string) {
   const res = await fetch(`${API_BASE}/worker/status`, { headers: headers(token) });
   if (!res.ok) throw new Error("Failed status");
-  return res.json() as Promise<{ monitoring_enabled: boolean; message: string }>;
+  return res.json() as Promise<WorkerStatusPayload>;
+}
+
+export type MonitoringReadiness = { ready: boolean; errors: string[] };
+
+export async function fetchMonitoringReadiness(token: string): Promise<MonitoringReadiness> {
+  const res = await fetch(`${API_BASE}/settings/monitoring-readiness`, { headers: headers(token) });
+  if (!res.ok) throw new Error("Failed readiness");
+  return res.json() as Promise<MonitoringReadiness>;
+}
+
+export type TelegramVerificationStart = {
+  code: string;
+  expires_at: string;
+  instructions: string;
+};
+
+export async function startTelegramVerification(token: string): Promise<TelegramVerificationStart> {
+  const res = await fetch(`${API_BASE}/settings/telegram/verification/start`, {
+    method: "POST",
+    headers: headers(token),
+  });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(typeof err?.detail === "string" ? err.detail : "Could not start verification");
+  }
+  return res.json() as Promise<TelegramVerificationStart>;
 }
 
 export type AdminUser = { id: number; username: string; role: string; created_at: string };
