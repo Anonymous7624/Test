@@ -36,3 +36,26 @@ def apply_sqlite_migrations(engine: Engine) -> None:
                 conn.execute(text("ALTER TABLE user_settings DROP COLUMN telegram_bot_token"))
             except Exception:
                 pass
+
+        # Geoapify-backed location fields
+        _geo_cols = [
+            ("location_text", "ALTER TABLE user_settings ADD COLUMN location_text VARCHAR(512) DEFAULT ''"),
+            ("center_lat", "ALTER TABLE user_settings ADD COLUMN center_lat FLOAT"),
+            ("center_lon", "ALTER TABLE user_settings ADD COLUMN center_lon FLOAT"),
+            ("geoapify_place_id", "ALTER TABLE user_settings ADD COLUMN geoapify_place_id VARCHAR(128)"),
+            ("boundary_context", "ALTER TABLE user_settings ADD COLUMN boundary_context TEXT"),
+        ]
+        for col_name, ddl in _geo_cols:
+            cur = {r[1] for r in conn.execute(text("PRAGMA table_info(user_settings)")).fetchall()}
+            if col_name not in cur:
+                conn.execute(text(ddl))
+        # Migrate legacy `location` column into location_text
+        us_cols5 = {r[1] for r in conn.execute(text("PRAGMA table_info(user_settings)")).fetchall()}
+        if "location" in us_cols5:
+            conn.execute(
+                text(
+                    "UPDATE user_settings SET location_text = location "
+                    "WHERE (location_text IS NULL OR TRIM(location_text) = '') "
+                    "AND location IS NOT NULL AND TRIM(location) != ''"
+                )
+            )

@@ -32,7 +32,11 @@ export type LoginResponse = {
 };
 
 export type UserSettings = {
-  location: string;
+  location_text: string;
+  center_lat: number | null;
+  center_lon: number | null;
+  geoapify_place_id: string | null;
+  boundary_context: Record<string, unknown> | null;
   radius_km: number;
   category_id: string;
   max_price: number;

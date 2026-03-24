@@ -30,5 +30,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("BACKEND_CORS_ORIGINS", "CORS_ORIGINS"),
     )
 
+    # Geoapify (geocoding + boundaries on server; never expose to client beyond autocomplete key)
+    geoapify_api_key: str = Field(default="", validation_alias="GEOAPIFY_API_KEY")
+
 
 settings = Settings()

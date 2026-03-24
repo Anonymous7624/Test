@@ -8,6 +8,7 @@ from app.deps import get_current_user
 from app.models import User, UserSettings
 from app.schemas import TelegramTestResult, UserSettingsOut, UserSettingsUpdate
 from app.services.categories_service import validate_category_id
+from app.services.location_service import LocationResolutionError, resolve_location_for_save
 from app.services.telegram_service import send_test_message
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -18,6 +19,22 @@ def _get_settings_row(db: Session, user: User) -> UserSettings:
     if not row:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Settings missing")
     return row
+
+
+def _location_subset_changed(
+    row: UserSettings,
+    data: dict,
+) -> bool:
+    """True if client sent a change to any location-related field."""
+    keys = ("location_text", "center_lat", "center_lon", "geoapify_place_id")
+    for k in keys:
+        if k not in data:
+            continue
+        cur = getattr(row, k)
+        new = data[k]
+        if cur != new:
+            return True
+    return False
 
 
 @router.get("/me", response_model=UserSettingsOut)
@@ -39,6 +56,47 @@ def update_my_settings(
     if "category_id" in data and data["category_id"] is not None:
         if not validate_category_id(data["category_id"]):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid category")
+
+    # Resolve Geoapify-backed location when the user edits location fields
+    if _location_subset_changed(row, data) or (
+        "location_text" in data and (data.get("location_text") or "").strip() and not row.location_text
+    ):
+        lt = (data.get("location_text") if "location_text" in data else None)
+        if lt is None:
+            lt = row.location_text
+        lt = (lt or "").strip()
+
+        if not lt:
+            data["center_lat"] = None
+            data["center_lon"] = None
+            data["geoapify_place_id"] = None
+            data["boundary_context"] = None
+            data["location_text"] = ""
+        else:
+            try:
+                resolved = resolve_location_for_save(
+                    location_text=lt,
+                    center_lat=data.get("center_lat", row.center_lat),
+                    center_lon=data.get("center_lon", row.center_lon),
+                    geoapify_place_id=data.get("geoapify_place_id", row.geoapify_place_id),
+                    fetch_boundaries=True,
+                )
+            except LocationResolutionError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=str(exc),
+                ) from exc
+            except RuntimeError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=str(exc),
+                ) from exc
+            data["location_text"] = resolved["location_text"]
+            data["center_lat"] = resolved["center_lat"]
+            data["center_lon"] = resolved["center_lon"]
+            data["geoapify_place_id"] = resolved["geoapify_place_id"]
+            data["boundary_context"] = resolved["boundary_context"]
+
     for k, v in data.items():
         setattr(row, k, v)
     if "telegram_chat_id" in data:

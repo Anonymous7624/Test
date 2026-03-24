@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import { useAuth } from "@/context/auth-context";
+import { GeoapifyLocationInput } from "@/components/geoapify-location-input";
 import {
   fetchCategories,
   fetchSettings,
@@ -58,10 +59,21 @@ export default function SettingsPage() {
       <form className="mt-6 max-w-lg space-y-4" onSubmit={onSubmit}>
         <div>
           <label className="block text-xs text-zinc-500">Location</label>
-          <input
-            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
-            value={settings.location}
-            onChange={(e) => setSettings({ ...settings, location: e.target.value })}
+          <GeoapifyLocationInput
+            location_text={settings.location_text}
+            center_lat={settings.center_lat}
+            center_lon={settings.center_lon}
+            geoapify_place_id={settings.geoapify_place_id}
+            onChange={(next) =>
+              setSettings({
+                ...settings,
+                location_text: next.location_text,
+                center_lat: next.center_lat,
+                center_lon: next.center_lon,
+                geoapify_place_id: next.geoapify_place_id,
+              })
+            }
+            inputClassName="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
           />
         </div>
         <div>

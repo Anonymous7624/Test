@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -30,23 +30,30 @@ class LoginResponse(BaseModel):
 
 
 class UserSettingsOut(BaseModel):
-    location: str
+    location_text: str
+    center_lat: float | None = None
+    center_lon: float | None = None
     radius_km: float
     category_id: str
     max_price: float
     telegram_chat_id: str | None
     telegram_connected: bool
     monitoring_enabled: bool
+    geoapify_place_id: str | None = None
+    boundary_context: dict[str, Any] | None = None
 
     model_config = {"from_attributes": True}
 
 
 class UserSettingsUpdate(BaseModel):
-    location: str | None = None
+    location_text: str | None = None
+    center_lat: float | None = None
+    center_lon: float | None = None
     radius_km: float | None = Field(default=None, ge=0)
     category_id: str | None = None
     max_price: float | None = Field(default=None, ge=0)
     telegram_chat_id: str | None = None
+    geoapify_place_id: str | None = None
 
 
 class TelegramTestResult(BaseModel):

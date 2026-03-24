@@ -28,6 +28,7 @@ from app.migrate_sqlite import apply_sqlite_migrations  # noqa: E402
 from app.models import User, UserSettings  # noqa: E402
 from mock_scraper import mock_fetch_batch  # noqa: E402
 from pipeline import process_batch  # noqa: E402
+from search_context import build_search_location_hint  # noqa: E402
 
 
 def tick() -> None:
@@ -40,9 +41,10 @@ def tick() -> None:
         )
         rows = list(db.scalars(stmt))
         for s in rows:
+            hint = build_search_location_hint(s)
             raws = mock_fetch_batch(
                 category_slug=s.category_id,
-                location=s.location,
+                location=hint,
                 max_price=s.max_price,
             )
             if raws:
