@@ -30,7 +30,7 @@ export default function DashboardPage() {
     return () => window.clearInterval(id);
   }, [token, load]);
 
-  const busyStates = new Set(["starting", "searching", "monitoring"]);
+  const busyStates = new Set(["starting", "backfill", "polling"]);
   const workerBusy = Boolean(worker?.monitoring_enabled && busyStates.has(worker?.monitoring_state ?? ""));
 
   return (
@@ -92,6 +92,56 @@ export default function DashboardPage() {
         </Link>
         .
       </p>
+
+      <div className="mt-10">
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-lg font-medium text-zinc-200">Recent matches</h2>
+          <Link href="/listings" className="text-sm text-emerald-400 hover:underline">
+            All listings →
+          </Link>
+        </div>
+        <div className="mt-4 overflow-x-auto rounded-xl border border-zinc-800">
+          <table className="min-w-full text-left text-sm">
+            <thead className="border-b border-zinc-800 bg-zinc-900/80 text-xs uppercase text-zinc-500">
+              <tr>
+                <th className="px-3 py-2">Title</th>
+                <th className="px-3 py-2">Est. profit</th>
+                <th className="px-3 py-2">Confidence</th>
+                <th className="px-3 py-2">Mode</th>
+                <th className="px-3 py-2">Alert</th>
+                <th className="px-3 py-2">Found</th>
+              </tr>
+            </thead>
+            <tbody>
+              {listings.slice(0, 8).map((r) => (
+                <tr key={r.id} className="border-b border-zinc-800/80">
+                  <td className="max-w-xs truncate px-3 py-2">{r.title}</td>
+                  <td className={`px-3 py-2 ${r.profitable ? "text-emerald-400" : ""}`}>
+                    ${r.estimated_profit.toFixed(2)}
+                  </td>
+                  <td className="px-3 py-2 text-zinc-400">
+                    {r.confidence != null ? `${(r.confidence * 100).toFixed(0)}%` : "—"}
+                  </td>
+                  <td className="px-3 py-2 text-zinc-400">
+                    {r.origin_type === "backfill" ? "Backfill" : "Live"}
+                  </td>
+                  <td className="px-3 py-2 text-zinc-400">{r.alert_sent ? "Sent" : r.alert_status}</td>
+                  <td className="whitespace-nowrap px-3 py-2 text-zinc-500">
+                    {new Date(r.found_at).toLocaleString()}
+                  </td>
+                </tr>
+              ))}
+              {listings.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="px-3 py-8 text-center text-zinc-500">
+                    No listings yet — run monitoring and keep the worker process running.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }

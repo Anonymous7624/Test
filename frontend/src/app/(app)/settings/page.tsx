@@ -152,7 +152,7 @@ export default function SettingsPage() {
     return <p className="text-zinc-500">Loading…</p>;
   }
 
-  const busyStates = new Set(["starting", "searching", "monitoring"]);
+  const busyStates = new Set(["starting", "backfill", "polling"]);
   const workerBusy = settings.monitoring_enabled && busyStates.has(worker?.monitoring_state ?? "");
   const canRun = (readiness?.ready ?? false) && !settings.monitoring_enabled;
 

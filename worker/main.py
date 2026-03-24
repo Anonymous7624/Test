@@ -1,5 +1,5 @@
 """
-Worker loop: poll users with monitoring_enabled — backfill then live polling — ingest mock listings.
+Worker loop: poll users with monitoring_enabled — backfill then live polling — Playwright + Ollama pipeline.
 
 Run from repository root (see README) so imports resolve:
   PYTHONPATH=backend;.;%CD%  (Windows PowerShell example in README)
@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -24,56 +25,61 @@ from pymongo.database import Database  # noqa: E402
 
 from app.config import settings  # noqa: E402
 from app.database import get_database  # noqa: E402
-from app.mongodb import ensure_indexes  # noqa: E402
 from app.domain import UserSettings as UserSettingsRow  # noqa: E402
+from app.mongodb import ensure_indexes  # noqa: E402
 from app.repositories.user_repository import UserRepository, settings_from_doc  # noqa: E402
-from mock_scraper import mock_fetch_backfill, mock_fetch_batch  # noqa: E402
+from mock_scraper import RawListing, mock_fetch_backfill, mock_fetch_batch  # noqa: E402
 from pipeline import process_batch  # noqa: E402
 from search_context import build_search_location_hint  # noqa: E402
 
 
+def _collect_raws(profile: UserSettingsRow, *, backfill: bool) -> list[RawListing]:
+    hint = build_search_location_hint(profile)
+    try:
+        from collector.playwright_collector import fetch_listings_playwright
+
+        return fetch_listings_playwright(backfill=backfill)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Playwright collector failed, using mock data: {exc}", flush=True)
+        if backfill:
+            return mock_fetch_backfill(
+                category_slug=profile.category_id,
+                location=hint,
+                max_price=float(profile.max_price),
+            )
+        return mock_fetch_batch(
+            category_slug=profile.category_id,
+            location=hint,
+            max_price=float(profile.max_price),
+        )
+
+
 def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
     repo = UserRepository(db)
-    hint = build_search_location_hint(s)
     now = datetime.utcnow()
-    if not s.backfill_complete:
-        s.monitoring_state = "searching"
+
+    if s.monitoring_state == "starting":
+        s.monitoring_state = "backfill"
         repo.replace_settings(s)
-        raws = mock_fetch_backfill(
-            category_slug=s.category_id,
-            location=hint,
-            max_price=float(s.max_price),
-        )
+
+    if not s.backfill_complete:
+        s.monitoring_state = "backfill"
+        repo.replace_settings(s)
+        raws = _collect_raws(s, backfill=True)
         if raws:
-            process_batch(
-                db,
-                raws,
-                owner_user_id=s.user_id,
-                telegram_chat_id=s.telegram_chat_id,
-                origin_type="backfill",
-            )
+            process_batch(db, raws, profile=s, origin_type="backfill")
         s.backfill_complete = True
-        s.monitoring_state = "monitoring"
+        s.monitoring_state = "polling"
         s.last_checked_at = now
         s.last_error = None
         repo.replace_settings(s)
         return
 
-    s.monitoring_state = "monitoring"
+    s.monitoring_state = "polling"
     repo.replace_settings(s)
-    raws = mock_fetch_batch(
-        category_slug=s.category_id,
-        location=hint,
-        max_price=float(s.max_price),
-    )
+    raws = _collect_raws(s, backfill=False)
     if raws:
-        process_batch(
-            db,
-            raws,
-            owner_user_id=s.user_id,
-            telegram_chat_id=s.telegram_chat_id,
-            origin_type="live",
-        )
+        process_batch(db, raws, profile=s, origin_type="live")
     s.last_checked_at = now
     s.last_error = None
     repo.replace_settings(s)
@@ -91,15 +97,17 @@ def tick() -> None:
                 s.last_error = str(exc)[:500]
                 UserRepository(db).replace_settings(s)
                 print(f"Worker user {s.user_id} error: {exc}", flush=True)
+                traceback.print_exc()
     finally:
         pass
 
 
 async def main_loop() -> None:
     ensure_indexes(get_database())
-    interval = float(os.environ.get("WORKER_POLL_SECONDS", "8"))
+    interval = float(os.environ.get("WORKER_POLL_SECONDS", "300"))
     print(
-        f"Worker started. MONGODB_URI={settings.mongodb_uri} db={settings.mongodb_database} poll={interval}s",
+        f"Worker started. MONGODB_URI={settings.mongodb_uri} db={settings.mongodb_database} "
+        f"poll={interval}s (default 300 = 5 min)",
         flush=True,
     )
     while True:
@@ -107,6 +115,7 @@ async def main_loop() -> None:
             tick()
         except Exception as exc:  # noqa: BLE001
             print(f"Worker tick error: {exc}", flush=True)
+            traceback.print_exc()
         await asyncio.sleep(interval)
 
 

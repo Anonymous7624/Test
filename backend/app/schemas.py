@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from app.domain import UserSettings as UserSettingsRow
+from app.domain import Listing, UserSettings as UserSettingsRow
 
 
 class Token(BaseModel):
@@ -113,16 +113,51 @@ class ListingOut(BaseModel):
     price: float
     estimated_resale: float
     estimated_profit: float
+    category_id: str
     category_slug: str
-    location: str
+    location_text: str
     found_at: datetime
     alert_status: str
     source_link: str
     source: str
     discovery_source: str
     profitable: bool
+    origin_type: str
+    alert_sent: bool
+    ai_result: dict[str, Any] | None = None
+    confidence: float | None = None
+    reasoning: str | None = None
+    should_alert: bool | None = None
 
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_listing(cls, row: Listing) -> "ListingOut":
+        """Map domain Listing (and legacy field names) to API shape."""
+        cid = getattr(row, "category_id", None) or getattr(row, "category_slug", "general")
+        lt = getattr(row, "location_text", None) or getattr(row, "location", "")
+        return cls(
+            id=row.id,
+            title=row.title,
+            price=row.price,
+            estimated_resale=row.estimated_resale,
+            estimated_profit=row.estimated_profit,
+            category_id=str(cid),
+            category_slug=str(cid),
+            location_text=str(lt),
+            found_at=row.found_at,
+            alert_status=row.alert_status,
+            source_link=row.source_link,
+            source=row.source,
+            discovery_source=getattr(row, "discovery_source", row.origin_type),
+            profitable=row.profitable,
+            origin_type=getattr(row, "origin_type", "live"),
+            alert_sent=getattr(row, "alert_sent", False),
+            ai_result=getattr(row, "ai_result", None),
+            confidence=getattr(row, "confidence", None),
+            reasoning=getattr(row, "reasoning", None),
+            should_alert=getattr(row, "should_alert", None),
+        )
 
 
 class AdminUserCreate(BaseModel):

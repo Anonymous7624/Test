@@ -15,6 +15,8 @@ class RawListing:
     category_slug: str
     source_link: str
     source: str
+    latitude: float | None = None
+    longitude: float | None = None
 
 
 def mock_fetch_batch(*, category_slug: str, location: str, max_price: float) -> list[RawListing]:

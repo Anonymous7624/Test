@@ -81,7 +81,9 @@ export default function ListingsPage() {
               <th className="px-3 py-2">Est. profit</th>
               <th className="px-3 py-2">Category</th>
               <th className="px-3 py-2">Location</th>
-              <th className="px-3 py-2">Source</th>
+              <th className="px-3 py-2">Mode</th>
+              <th className="px-3 py-2">Confidence</th>
+              <th className="px-3 py-2">AI reasoning</th>
               <th className="px-3 py-2">Found</th>
               <th className="px-3 py-2">Alert</th>
               <th className="px-3 py-2">Link</th>
@@ -96,15 +98,24 @@ export default function ListingsPage() {
                 <td className={`px-3 py-2 ${r.profitable ? "text-emerald-400" : ""}`}>
                   ${r.estimated_profit.toFixed(2)}
                 </td>
-                <td className="px-3 py-2">{r.category_slug}</td>
-                <td className="px-3 py-2">{r.location}</td>
+                <td className="px-3 py-2">{r.category_id || r.category_slug}</td>
+                <td className="px-3 py-2">{r.location_text}</td>
                 <td className="px-3 py-2 text-zinc-400">
-                  {r.discovery_source === "backfill" ? "Initial backfill" : "Live monitoring"}
+                  {r.origin_type === "backfill" ? "Backfill" : "Live"}
+                </td>
+                <td className="px-3 py-2 text-zinc-400">
+                  {r.confidence != null ? `${(r.confidence * 100).toFixed(0)}%` : "—"}
+                </td>
+                <td className="max-w-xs truncate px-3 py-2 text-zinc-400" title={r.reasoning ?? ""}>
+                  {r.reasoning ?? "—"}
                 </td>
                 <td className="whitespace-nowrap px-3 py-2 text-zinc-400">
                   {new Date(r.found_at).toLocaleString()}
                 </td>
-                <td className="px-3 py-2">{r.alert_status}</td>
+                <td className="px-3 py-2">
+                  {r.alert_sent ? "sent" : r.alert_status}
+                  {r.should_alert != null ? ` (${r.should_alert ? "AI yes" : "AI no"})` : ""}
+                </td>
                 <td className="px-3 py-2">
                   <a
                     href={r.source_link}
@@ -119,7 +130,7 @@ export default function ListingsPage() {
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={10} className="px-3 py-12 text-center text-zinc-500">
+                <td colSpan={12} className="px-3 py-12 text-center text-zinc-500">
                   <p className="text-sm font-medium text-zinc-400">No listings yet</p>
                   <p className="mt-2 max-w-md text-xs text-zinc-500">
                     Save valid settings in Settings, verify Telegram, click Run monitoring, and keep the worker process

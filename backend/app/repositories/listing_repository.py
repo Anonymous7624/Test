@@ -11,6 +11,19 @@ from app.mongodb import next_sequence
 
 def _listing_from_doc(doc: dict) -> Listing:
     origin = str(doc.get("origin_type") or doc.get("discovery_source") or "live")
+    cat = doc.get("category_id") or doc.get("category_slug") or "general"
+    loc = doc.get("location_text") or doc.get("location") or ""
+    raw_ai = doc.get("ai_result")
+    ai_dict = raw_ai if isinstance(raw_ai, dict) else {}
+    conf = doc.get("confidence")
+    if conf is None and ai_dict:
+        conf = ai_dict.get("confidence")
+    reason = doc.get("reasoning")
+    if reason is None and ai_dict:
+        reason = ai_dict.get("reasoning")
+    sa = doc.get("should_alert")
+    if sa is None and ai_dict:
+        sa = ai_dict.get("should_alert")
     return Listing(
         id=int(doc["id"]),
         user_id=int(doc["user_id"]),
@@ -20,8 +33,8 @@ def _listing_from_doc(doc: dict) -> Listing:
         price=float(doc["price"]),
         estimated_resale=float(doc["estimated_resale"]),
         estimated_profit=float(doc["estimated_profit"]),
-        category_slug=str(doc["category_slug"]),
-        location=str(doc["location"]),
+        category_id=str(cat),
+        location_text=str(loc),
         found_at=doc["found_at"],
         alert_status=str(doc["alert_status"]),
         source_link=str(doc["source_link"]),
@@ -30,6 +43,10 @@ def _listing_from_doc(doc: dict) -> Listing:
         discovery_source=str(doc.get("discovery_source") or origin),
         profitable=bool(doc.get("profitable", False)),
         alert_sent=bool(doc.get("alert_sent", doc.get("alert_status") == AlertStatus.sent.value)),
+        ai_result=raw_ai if isinstance(raw_ai, dict) else None,
+        confidence=float(conf) if conf is not None else None,
+        reasoning=str(reason) if reason is not None else None,
+        should_alert=bool(sa) if sa is not None else None,
     )
 
 
@@ -51,14 +68,18 @@ class ListingRepository:
         price: float,
         estimated_resale: float,
         estimated_profit: float,
-        category_slug: str,
-        location: str,
+        category_id: str,
+        location_text: str,
         source_link: str,
         source: str,
         profitable: bool,
         alert_status: str,
         found_at: datetime | None = None,
         origin_type: str = "live",
+        ai_result: dict | None = None,
+        confidence: float | None = None,
+        reasoning: str | None = None,
+        should_alert: bool | None = None,
     ) -> Listing | None:
         """Insert listing; returns None if duplicate (user_id + source_url)."""
         lid = next_sequence(self.db, "listings")
@@ -73,8 +94,10 @@ class ListingRepository:
             "price": price,
             "estimated_resale": estimated_resale,
             "estimated_profit": estimated_profit,
-            "category_slug": category_slug,
-            "location": location,
+            "category_id": category_id,
+            "category_slug": category_id,
+            "location_text": location_text,
+            "location": location_text,
             "found_at": now,
             "alert_status": alert_status,
             "source_link": source_link,
@@ -83,6 +106,10 @@ class ListingRepository:
             "discovery_source": origin_type,
             "profitable": profitable,
             "alert_sent": alert_sent,
+            "ai_result": ai_result,
+            "confidence": confidence,
+            "reasoning": reasoning,
+            "should_alert": should_alert,
         }
         try:
             self.db["listings"].insert_one(doc)
@@ -102,7 +129,10 @@ class ListingRepository:
         if profitable_only:
             q["profitable"] = True
         if category_slug:
-            q["category_slug"] = category_slug
+            q["$or"] = [
+                {"category_id": category_slug},
+                {"category_slug": category_slug},
+            ]
         cur = self.db["listings"].find(q).sort([("found_at", DESCENDING)]).limit(limit)
         return [_listing_from_doc(d) for d in cur]
 

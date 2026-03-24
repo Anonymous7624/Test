@@ -23,4 +23,4 @@ def list_listings(
         profitable_only=profitable_only,
         category_slug=category,
     )
-    return [ListingOut.model_validate(r) for r in rows]
+    return [ListingOut.from_listing(r) for r in rows]

@@ -19,3 +19,11 @@ def category_ids() -> list[str]:
 
 def validate_category_id(category_id: str) -> bool:
     return category_id in set(category_ids())
+
+
+def keywords_for_category(category_id: str) -> list[str]:
+    data = load_categories()
+    for c in data.get("categories") or []:
+        if c.get("id") == category_id:
+            return list(c.get("keywords") or [])
+    return []

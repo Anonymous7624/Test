@@ -58,14 +58,21 @@ export type ListingRow = {
   price: number;
   estimated_resale: number;
   estimated_profit: number;
+  category_id: string;
   category_slug: string;
-  location: string;
+  location_text: string;
   found_at: string;
   alert_status: string;
   source_link: string;
   source: string;
   discovery_source: string;
+  origin_type: string;
   profitable: boolean;
+  alert_sent: boolean;
+  ai_result: Record<string, unknown> | null;
+  confidence: number | null;
+  reasoning: string | null;
+  should_alert: boolean | null;
 };
 
 export type Category = { id: string; label: string; keywords: string[] };

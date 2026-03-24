@@ -45,8 +45,8 @@ class Listing:
     price: float
     estimated_resale: float
     estimated_profit: float
-    category_slug: str
-    location: str
+    category_id: str
+    location_text: str
     found_at: datetime
     alert_status: str
     source_link: str
@@ -55,3 +55,7 @@ class Listing:
     discovery_source: str
     profitable: bool
     alert_sent: bool
+    ai_result: dict | None
+    confidence: float | None
+    reasoning: str | None
+    should_alert: bool | None
