@@ -2,12 +2,14 @@ import secrets
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from pymongo.database import Database
 
 from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user
-from app.models import User, UserSettings
+from app.domain import User
+from app.domain import UserSettings as UserSettingsRow
+from app.repositories.user_repository import UserRepository
 from app.schemas import (
     TelegramTestResult,
     TelegramVerificationStart,
@@ -29,15 +31,16 @@ from app.services.units import km_to_miles, miles_to_km
 router = APIRouter(prefix="/settings", tags=["settings"])
 
 
-def _get_settings_row(db: Session, user: User) -> UserSettings:
-    row = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
+def _get_settings_row(db: Database, user: User) -> UserSettingsRow:
+    repo = UserRepository(db)
+    row = repo.get_settings(user.id)
     if not row:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Settings missing")
     return row
 
 
 def _location_subset_changed(
-    row: UserSettings,
+    row: UserSettingsRow,
     data: dict,
 ) -> bool:
     """True if client sent a change to any location-related field."""
@@ -55,18 +58,18 @@ def _location_subset_changed(
 @router.get("/monitoring-readiness")
 def monitoring_readiness(
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
 ) -> dict:
     row = _get_settings_row(db, user)
-    errs = readiness_errors(db, row)
-    checks = readiness_checks(db, row)
+    errs = readiness_errors(row)
+    checks = readiness_checks(row)
     return {"ready": len(errs) == 0, "errors": errs, "checks": checks}
 
 
 @router.get("/me", response_model=UserSettingsOut)
 def get_my_settings(
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
 ) -> UserSettingsOut:
     return user_settings_out_from_row(_get_settings_row(db, user))
 
@@ -75,8 +78,9 @@ def get_my_settings(
 def update_my_settings(
     body: UserSettingsUpdate,
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
 ) -> UserSettingsOut:
+    repo = UserRepository(db)
     row = _get_settings_row(db, user)
     data = body.model_dump(exclude_unset=True)
     if "radius_miles" in data and data["radius_miles"] is not None:
@@ -135,30 +139,27 @@ def update_my_settings(
         setattr(row, k, v)
     if "telegram_chat_id" in data:
         row.telegram_connected = bool((data.get("telegram_chat_id") or "").strip())
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return user_settings_out_from_row(row)
+    repo.replace_settings(row)
+    return user_settings_out_from_row(_get_settings_row(db, user))
 
 
 @router.post("/telegram/verification/start", response_model=TelegramVerificationStart)
 def start_telegram_verification(
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
 ) -> TelegramVerificationStart:
     if not (settings.telegram_bot_token or "").strip():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="TELEGRAM_BOT_TOKEN is not configured on the server.",
         )
+    repo = UserRepository(db)
     row = _get_settings_row(db, user)
     code = secrets.token_hex(4).upper()[:10]
     exp = datetime.utcnow() + timedelta(minutes=15)
     row.telegram_verify_code = code
     row.telegram_verify_expires_at = exp
-    db.add(row)
-    db.commit()
-    db.refresh(row)
+    repo.replace_settings(row)
     bot_u = (settings.telegram_bot_username or "").strip().lstrip("@") or "Facebookcatching_bot"
     bot_at = f"@{bot_u}"
     start_cmd = f"/start {code}"
@@ -177,7 +178,7 @@ def start_telegram_verification(
 @router.post("/telegram/test", response_model=TelegramTestResult)
 def send_telegram_test(
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
 ) -> TelegramTestResult:
     row = _get_settings_row(db, user)
     cid = (row.telegram_chat_id or "").strip()

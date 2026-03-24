@@ -1,21 +1,5 @@
-from collections.abc import Generator
+"""Compatibility shim: MongoDB is the primary store (see `app.mongodb`)."""
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, declarative_base, sessionmaker
+from app.mongodb import close_mongo_client, get_database, get_db
 
-from app.config import settings
-
-# Future: set DATABASE_URL to postgresql+psycopg2://... and deploy Postgres (RDS, Cloud SQL, etc.).
-# Repositories stay unchanged; only engine URL and optional pool settings differ.
-connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-engine = create_engine(settings.database_url, connect_args=connect_args)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-
-def get_db() -> Generator[Session, None, None]:
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+__all__ = ["close_mongo_client", "get_database", "get_db"]

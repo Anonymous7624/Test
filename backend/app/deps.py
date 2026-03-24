@@ -1,9 +1,10 @@
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy.orm import Session
+from pymongo.database import Database
 
 from app.database import get_db
-from app.models import User, UserRole
+from app.domain import User
+from app.models import UserRole
 from app.repositories.user_repository import UserRepository
 from jose import JWTError
 
@@ -14,7 +15,7 @@ bearer = HTTPBearer(auto_error=False)
 
 def get_current_user(
     creds: HTTPAuthorizationCredentials | None = Depends(bearer),
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
 ) -> User:
     if not creds or not creds.credentials:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")

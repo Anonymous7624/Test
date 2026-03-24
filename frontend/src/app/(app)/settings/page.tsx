@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
 import { GeoapifyLocationInput } from "@/components/geoapify-location-input";
@@ -20,12 +20,26 @@ import {
   type WorkerStatusPayload,
 } from "@/lib/api";
 
+function editableSnapshot(s: UserSettings): string {
+  return JSON.stringify({
+    location_text: s.location_text,
+    center_lat: s.center_lat,
+    center_lon: s.center_lon,
+    geoapify_place_id: s.geoapify_place_id,
+    radius_miles: s.radius_miles,
+    category_id: s.category_id,
+    max_price: s.max_price,
+    telegram_chat_id: s.telegram_chat_id ?? null,
+  });
+}
+
+type SaveUiState = "unsaved" | "saving" | "saved" | "error";
+
 export default function SettingsPage() {
   const router = useRouter();
   const { token, logout } = useAuth();
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [categoryOptions, setCategoryOptions] = useState<{ id: string; label: string }[]>([]);
-  const [msg, setMsg] = useState<string | null>(null);
   const [telegramMsg, setTelegramMsg] = useState<string | null>(null);
   const [verifyInfo, setVerifyInfo] = useState<{
     code: string;
@@ -36,10 +50,14 @@ export default function SettingsPage() {
   const [readiness, setReadiness] = useState<MonitoringReadiness | null>(null);
   const [worker, setWorker] = useState<WorkerStatusPayload | null>(null);
   const [runErr, setRunErr] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+  const [saveUi, setSaveUi] = useState<SaveUiState>("saved");
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deletePassword, setDeletePassword] = useState("");
   const [deleteErr, setDeleteErr] = useState<string | null>(null);
+
+  const lastSavedSnapshotRef = useRef<string>("");
+  const isHydratedRef = useRef(false);
+  const editableDirtyRef = useRef(false);
 
   const loadAll = useCallback(async () => {
     if (!token) return;
@@ -51,6 +69,10 @@ export default function SettingsPage() {
     ]);
     setCategoryOptions(categories.map((c) => ({ id: c.id, label: c.label })));
     setSettings(s);
+    lastSavedSnapshotRef.current = editableSnapshot(s);
+    isHydratedRef.current = true;
+    editableDirtyRef.current = false;
+    setSaveUi("saved");
     setWorker(st);
     setReadiness(rd);
   }, [token]);
@@ -64,18 +86,54 @@ export default function SettingsPage() {
   }, [settings?.telegram_connected]);
 
   useEffect(() => {
+    if (!token || !settings || !isHydratedRef.current) return;
+    const snap = editableSnapshot(settings);
+    if (snap === lastSavedSnapshotRef.current) return;
+    editableDirtyRef.current = true;
+    setSaveUi("unsaved");
+    const t = window.setTimeout(() => {
+      void (async () => {
+        if (!token || !settings) return;
+        const snapBeforeSave = editableSnapshot(settings);
+        if (snapBeforeSave === lastSavedSnapshotRef.current) return;
+        setSaveUi("saving");
+        try {
+          const { radius_km, ...rest } = settings;
+          void radius_km;
+          const next = await updateSettings(token, { ...rest, radius_miles: settings.radius_miles });
+          if (editableSnapshot(settings) !== snapBeforeSave) {
+            setReadiness(await fetchMonitoringReadiness(token));
+            setSaveUi("unsaved");
+            return;
+          }
+          setSettings(next);
+          lastSavedSnapshotRef.current = editableSnapshot(next);
+          editableDirtyRef.current = false;
+          setSaveUi("saved");
+          const rd = await fetchMonitoringReadiness(token);
+          setReadiness(rd);
+        } catch {
+          setSaveUi("error");
+        }
+      })();
+    }, 700);
+    return () => window.clearTimeout(t);
+  }, [settings, token]);
+
+  useEffect(() => {
     if (!token) return;
     const id = window.setInterval(() => {
       void (async () => {
         try {
-          const [st, rd, s] = await Promise.all([
-            workerStatus(token),
-            fetchMonitoringReadiness(token),
-            fetchSettings(token),
-          ]);
+          const [st, rd] = await Promise.all([workerStatus(token), fetchMonitoringReadiness(token)]);
           setWorker(st);
           setReadiness(rd);
-          setSettings(s);
+          if (!editableDirtyRef.current) {
+            const s = await fetchSettings(token);
+            setSettings(s);
+            lastSavedSnapshotRef.current = editableSnapshot(s);
+            setSaveUi("saved");
+          }
         } catch {
           /* ignore */
         }
@@ -84,24 +142,8 @@ export default function SettingsPage() {
     return () => window.clearInterval(id);
   }, [token]);
 
-  async function onSubmit(e: FormEvent) {
+  function onFormSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!token || !settings) return;
-    setMsg(null);
-    setSaving(true);
-    try {
-      const { radius_km, ...rest } = settings;
-      void radius_km;
-      const next = await updateSettings(token, { ...rest, radius_miles: settings.radius_miles });
-      setSettings(next);
-      const rd = await fetchMonitoringReadiness(token);
-      setReadiness(rd);
-      setMsg("Saved.");
-    } catch (err) {
-      setMsg(err instanceof Error ? err.message : "Save failed.");
-    } finally {
-      setSaving(false);
-    }
   }
 
   const readinessRows = readiness?.checks ?? [];
@@ -113,22 +155,43 @@ export default function SettingsPage() {
   const busyStates = new Set(["starting", "searching", "monitoring"]);
   const workerBusy = settings.monitoring_enabled && busyStates.has(worker?.monitoring_state ?? "");
   const canRun = (readiness?.ready ?? false) && !settings.monitoring_enabled;
-  const canSave = Boolean(token && settings && !saving);
-  const saveDisabledReason = !token
-    ? "Sign in to save settings."
-    : !settings
-      ? "Loading settings…"
-      : saving
-        ? "Saving…"
-        : null;
+
   let runDisabledReason: string | null = null;
   if (!readiness) runDisabledReason = "Loading readiness…";
   else if (settings.monitoring_enabled) runDisabledReason = "Stop monitoring before starting again.";
-  else if (!readiness.ready) runDisabledReason = "Run is blocked until every item below passes (save settings after edits).";
+  else if (!readiness.ready)
+    runDisabledReason =
+      "Run is blocked until every item below passes (finish editing and wait until settings show Saved).";
+
+  const saveUiLabel =
+    saveUi === "saving"
+      ? "Saving…"
+      : saveUi === "saved"
+        ? "Saved"
+        : saveUi === "unsaved"
+          ? "Unsaved changes"
+          : "Error saving";
+
+  const saveUiClass =
+    saveUi === "error"
+      ? "text-red-400"
+      : saveUi === "unsaved"
+        ? "text-amber-200/95"
+        : saveUi === "saving"
+          ? "text-zinc-300"
+          : "text-emerald-400/95";
 
   return (
     <div>
       <h1 className="text-2xl font-semibold">Settings</h1>
+
+      <div
+        className="mt-3 flex min-h-[2rem] items-center rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2 text-sm"
+        role="status"
+        aria-live="polite"
+      >
+        <span className={`font-medium ${saveUiClass}`}>{saveUiLabel}</span>
+      </div>
 
       <div className="mt-6 max-w-2xl space-y-6">
         <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
@@ -186,7 +249,7 @@ export default function SettingsPage() {
           ) : null}
         </div>
 
-        <form className="max-w-lg space-y-4" onSubmit={onSubmit}>
+        <form className="max-w-lg space-y-4" onSubmit={onFormSubmit}>
           <div>
             <label className="block text-xs text-zinc-500">Location</label>
             <GeoapifyLocationInput
@@ -242,31 +305,18 @@ export default function SettingsPage() {
               step={1}
               className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
               value={settings.max_price}
-              onChange={(e) => setSettings({ ...settings, max_price: Number(e.target.value) })}
+              onChange={(e) =>
+                setSettings({ ...settings, max_price: Number(e.target.value) })
+              }
             />
             <p className="mt-1 text-[11px] text-zinc-500">Prices are shown and stored in US dollars.</p>
           </div>
 
           <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-3">
             <p className="text-xs text-zinc-400">
-              Save stores location, radius, category, price, and Telegram fields. This does not depend on monitoring
-              readiness or Telegram — you can save partial progress anytime.
+              Location, radius, category, price, and Telegram fields save automatically shortly after you stop editing.
+              Partial progress is kept when validation fails for a field (check the status above).
             </p>
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <button
-                type="submit"
-                disabled={!canSave}
-                title={!canSave ? saveDisabledReason ?? undefined : undefined}
-                aria-label="Save settings"
-                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {saving ? "Saving…" : "Save settings"}
-              </button>
-              {!canSave && saveDisabledReason ? (
-                <span className="text-xs text-amber-200/90">{saveDisabledReason}</span>
-              ) : null}
-            </div>
-            {msg && <p className="mt-2 text-sm text-emerald-400">{msg}</p>}
           </div>
 
           <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-4">
@@ -359,7 +409,7 @@ export default function SettingsPage() {
                 }
               />
               <p className="mt-1 text-[11px] text-zinc-600">
-                Save settings after editing. If set, Run treats Telegram as configured without the /start code flow.
+                Changes save automatically. If set, Run treats Telegram as configured without the /start code flow.
               </p>
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
@@ -379,6 +429,9 @@ export default function SettingsPage() {
                     });
                     const next = await fetchSettings(token);
                     setSettings(next);
+                    lastSavedSnapshotRef.current = editableSnapshot(next);
+                    editableDirtyRef.current = false;
+                    setSaveUi("saved");
                     const rd = await fetchMonitoringReadiness(token);
                     setReadiness(rd);
                     setTelegramMsg(`Code ready — send it to ${next.telegram_bot_username} in Telegram.`);
@@ -435,7 +488,9 @@ export default function SettingsPage() {
             {readiness?.ready ? (
               <p className="mt-3 text-xs text-emerald-500/90">All checks pass — you can run monitoring.</p>
             ) : readiness ? (
-              <p className="mt-3 text-xs text-amber-200/80">Fix every item marked ❌ (and save settings if you changed them).</p>
+              <p className="mt-3 text-xs text-amber-200/80">
+                Fix every item marked ❌ (edits save automatically — wait for Saved before Run if you changed settings).
+              </p>
             ) : null}
           </div>
 
@@ -460,6 +515,9 @@ export default function SettingsPage() {
                   ]);
                   setWorker(st);
                   setSettings(s);
+                  lastSavedSnapshotRef.current = editableSnapshot(s);
+                  editableDirtyRef.current = false;
+                  setSaveUi("saved");
                   setReadiness(rd);
                 } catch (e) {
                   setRunErr(e instanceof Error ? e.message : "Failed to start");
@@ -482,6 +540,9 @@ export default function SettingsPage() {
                 const [st, s] = await Promise.all([workerStatus(token), fetchSettings(token)]);
                 setWorker(st);
                 setSettings(s);
+                lastSavedSnapshotRef.current = editableSnapshot(s);
+                editableDirtyRef.current = false;
+                setSaveUi("saved");
               }}
             >
               Stop monitoring

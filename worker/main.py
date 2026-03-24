@@ -20,25 +20,25 @@ _BACKEND = _REPO / "backend"
 sys.path.insert(0, str(_BACKEND))
 sys.path.insert(0, str(_ROOT))
 
-from sqlalchemy import select  # noqa: E402
-from sqlalchemy.orm import Session  # noqa: E402
+from pymongo.database import Database  # noqa: E402
 
 from app.config import settings  # noqa: E402
-from app.database import Base, SessionLocal, engine  # noqa: E402
-from app.migrate_sqlite import apply_sqlite_migrations  # noqa: E402
-from app.models import User, UserSettings  # noqa: E402
+from app.database import get_database  # noqa: E402
+from app.mongodb import ensure_indexes  # noqa: E402
+from app.domain import UserSettings as UserSettingsRow  # noqa: E402
+from app.repositories.user_repository import UserRepository, settings_from_doc  # noqa: E402
 from mock_scraper import mock_fetch_backfill, mock_fetch_batch  # noqa: E402
 from pipeline import process_batch  # noqa: E402
 from search_context import build_search_location_hint  # noqa: E402
 
 
-def _process_monitoring_user(db: Session, s: UserSettings) -> None:
+def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
+    repo = UserRepository(db)
     hint = build_search_location_hint(s)
     now = datetime.utcnow()
     if not s.backfill_complete:
         s.monitoring_state = "searching"
-        db.add(s)
-        db.commit()
+        repo.replace_settings(s)
         raws = mock_fetch_backfill(
             category_slug=s.category_id,
             location=hint,
@@ -50,19 +50,17 @@ def _process_monitoring_user(db: Session, s: UserSettings) -> None:
                 raws,
                 owner_user_id=s.user_id,
                 telegram_chat_id=s.telegram_chat_id,
-                discovery_source="backfill",
+                origin_type="backfill",
             )
         s.backfill_complete = True
         s.monitoring_state = "monitoring"
         s.last_checked_at = now
         s.last_error = None
-        db.add(s)
-        db.commit()
+        repo.replace_settings(s)
         return
 
     s.monitoring_state = "monitoring"
-    db.add(s)
-    db.commit()
+    repo.replace_settings(s)
     raws = mock_fetch_batch(
         category_slug=s.category_id,
         location=hint,
@@ -74,42 +72,36 @@ def _process_monitoring_user(db: Session, s: UserSettings) -> None:
             raws,
             owner_user_id=s.user_id,
             telegram_chat_id=s.telegram_chat_id,
-            discovery_source="live",
+            origin_type="live",
         )
     s.last_checked_at = now
     s.last_error = None
-    db.add(s)
-    db.commit()
+    repo.replace_settings(s)
 
 
 def tick() -> None:
-    db: Session = SessionLocal()
+    db: Database = get_database()
     try:
-        stmt = (
-            select(UserSettings)
-            .join(User, UserSettings.user_id == User.id)
-            .where(UserSettings.monitoring_enabled.is_(True))
-        )
-        rows = list(db.scalars(stmt))
-        for s in rows:
+        for doc in db["user_settings"].find({"monitoring_enabled": True}):
+            s = settings_from_doc(doc)
             try:
                 _process_monitoring_user(db, s)
             except Exception as exc:  # noqa: BLE001 — surface errors in MVP worker
                 s.monitoring_state = "error"
                 s.last_error = str(exc)[:500]
-                db.add(s)
-                db.commit()
+                UserRepository(db).replace_settings(s)
                 print(f"Worker user {s.user_id} error: {exc}", flush=True)
     finally:
-        db.close()
+        pass
 
 
 async def main_loop() -> None:
-    Path("data").mkdir(parents=True, exist_ok=True)
-    Base.metadata.create_all(bind=engine)
-    apply_sqlite_migrations(engine)
+    ensure_indexes(get_database())
     interval = float(os.environ.get("WORKER_POLL_SECONDS", "8"))
-    print(f"Worker started. DATABASE_URL={settings.database_url} poll={interval}s", flush=True)
+    print(
+        f"Worker started. MONGODB_URI={settings.mongodb_uri} db={settings.mongodb_database} poll={interval}s",
+        flush=True,
+    )
     while True:
         try:
             tick()

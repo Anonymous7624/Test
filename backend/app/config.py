@@ -27,8 +27,9 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str = "changeme"
 
-    # SQLite by default; swap for postgresql+asyncpg later via DATABASE_URL
-    database_url: str = "sqlite:///./data/app.db"
+    # MongoDB (users, settings, listings). Use MONGODB_URI from environment.
+    mongodb_uri: str = Field(default="mongodb://localhost:27017", validation_alias="MONGODB_URI")
+    mongodb_database: str = Field(default="deal_dashboard", validation_alias="MONGODB_DATABASE")
 
     # Categories JSON (centralized config)
     categories_path: str = str(

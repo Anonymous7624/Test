@@ -2,10 +2,10 @@ from datetime import datetime, timedelta, timezone
 
 import bcrypt
 from jose import jwt
-from sqlalchemy.orm import Session
+from pymongo.database import Database
 
 from app.config import settings
-from app.models import User
+from app.domain import User
 from app.repositories.user_repository import UserRepository
 
 
@@ -30,7 +30,7 @@ def decode_token(token: str) -> dict:
     return jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
 
 
-def authenticate_user(db: Session, username: str, password: str) -> User | None:
+def authenticate_user(db: Database, username: str, password: str) -> User | None:
     repo = UserRepository(db)
     user = repo.get_by_username(username)
     if not user or not verify_password(password, user.password_hash):

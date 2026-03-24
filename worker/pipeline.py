@@ -9,14 +9,15 @@ from app.models import AlertStatus
 from app.repositories.listing_repository import ListingRepository
 from app.services.profit_estimation import estimate_profit
 from app.services.telegram_service import send_profit_alert
-from sqlalchemy.orm import Session
+from pymongo.database import Database
 
 from mock_scraper import RawListing
 
 
 @dataclass
 class NormalizedListing:
-    external_id: str
+    source_url: str
+    source_id: str | None
     title: str
     price: float
     location: str
@@ -27,8 +28,10 @@ class NormalizedListing:
 
 def normalize(raw: RawListing, owner_user_id: int) -> NormalizedListing:
     ext = raw.source_link.rsplit("/", maxsplit=1)[-1]
+    source_url = raw.source_link.strip()
     return NormalizedListing(
-        external_id=f"u{owner_user_id}:{raw.source}:{ext}",
+        source_url=source_url,
+        source_id=f"{raw.source}:{ext}",
         title=raw.title.strip(),
         price=raw.price,
         location=raw.location.strip(),
@@ -39,19 +42,19 @@ def normalize(raw: RawListing, owner_user_id: int) -> NormalizedListing:
 
 
 def process_batch(
-    db: Session,
+    db: Database,
     raws: list[RawListing],
     *,
     owner_user_id: int,
     telegram_chat_id: str | None,
-    discovery_source: str = "live",
+    origin_type: str = "live",
 ) -> int:
     """Insert new listings; returns count inserted."""
     repo = ListingRepository(db)
     inserted = 0
     for raw in raws:
         norm = normalize(raw, owner_user_id)
-        if repo.get_by_external_id(norm.external_id):
+        if repo.find_by_user_source_url(owner_user_id, norm.source_url):
             continue
         est = estimate_profit(norm.price, norm.category_slug)
         alert_status = AlertStatus.none.value
@@ -63,9 +66,10 @@ def process_batch(
                 estimated_profit=est.estimated_profit,
             )
             alert_status = AlertStatus.sent.value if sent else AlertStatus.pending.value
-        repo.create(
+        created = repo.create(
             user_id=owner_user_id,
-            external_id=norm.external_id,
+            source_url=norm.source_url,
+            source_id=norm.source_id,
             title=norm.title,
             price=norm.price,
             estimated_resale=est.estimated_resale,
@@ -77,7 +81,8 @@ def process_batch(
             profitable=est.profitable,
             alert_status=alert_status,
             found_at=datetime.utcnow(),
-            discovery_source=discovery_source,
+            origin_type=origin_type,
         )
-        inserted += 1
+        if created is not None:
+            inserted += 1
     return inserted

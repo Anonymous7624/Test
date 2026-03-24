@@ -7,10 +7,8 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from pymongo.database import Database
 
-from app.models import UserSettings
 from app.services.telegram_service import fetch_updates, send_verification_success
 
 
@@ -24,7 +22,7 @@ def _parse_start_code(text: str | None) -> str | None:
     return m.group(1)
 
 
-def process_telegram_updates(db: Session, offset: int | None) -> int | None:
+def process_telegram_updates(db: Database, offset: int | None) -> int | None:
     """Apply pending verification codes; returns next offset for getUpdates."""
     updates, next_off = fetch_updates(offset=offset, timeout=0)
     for u in updates:
@@ -39,19 +37,24 @@ def process_telegram_updates(db: Session, offset: int | None) -> int | None:
         code = _parse_start_code(text)
         if not code or chat_id is None:
             continue
-        row = db.scalar(
-            select(UserSettings).where(
-                UserSettings.telegram_verify_code == code,
-                UserSettings.telegram_verify_expires_at > datetime.utcnow(),
-            )
+        doc = db["user_settings"].find_one(
+            {
+                "telegram_verify_code": code,
+                "telegram_verify_expires_at": {"$gt": datetime.utcnow()},
+            }
         )
-        if not row:
+        if not doc:
             continue
-        row.telegram_chat_id = str(int(chat_id))
-        row.telegram_connected = True
-        row.telegram_verify_code = None
-        row.telegram_verify_expires_at = None
-        db.add(row)
-        db.commit()
+        db["user_settings"].update_one(
+            {"user_id": doc["user_id"]},
+            {
+                "$set": {
+                    "telegram_chat_id": str(int(chat_id)),
+                    "telegram_connected": True,
+                    "telegram_verify_code": None,
+                    "telegram_verify_expires_at": None,
+                }
+            },
+        )
         send_verification_success(str(int(chat_id)))
     return next_off

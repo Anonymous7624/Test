@@ -1,17 +1,12 @@
 import asyncio
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Production: run behind Cloudflare Tunnel (cloudflared) or a reverse proxy so the API is reachable
-# from the Next.js frontend and from Telegram webhooks without exposing raw ports. Point tunnel
-# public hostname to this Uvicorn process (e.g. localhost:8000) and set BACKEND_CORS_ORIGINS to the tunnel URL.
-
 from app.config import log_telegram_token_diagnostic, settings
-from app.database import Base, engine
-from app.migrate_sqlite import apply_sqlite_migrations
+from app.database import get_database
+from app.mongodb import close_mongo_client, ensure_indexes
 from app.routers import admin, auth, categories, listings, settings as settings_router, worker_control
 from app.seed import seed_default_admin
 
@@ -25,14 +20,10 @@ async def _telegram_poll_loop() -> None:
             await asyncio.sleep(5)
             continue
         try:
-            from app.database import SessionLocal
             from app.services.telegram_updates import process_telegram_updates
 
-            db = SessionLocal()
-            try:
-                _telegram_offset = process_telegram_updates(db, _telegram_offset)
-            finally:
-                db.close()
+            db = get_database()
+            _telegram_offset = process_telegram_updates(db, _telegram_offset)
         except Exception:
             pass
         await asyncio.sleep(2)
@@ -41,16 +32,9 @@ async def _telegram_poll_loop() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     log_telegram_token_diagnostic()
-    Path("data").mkdir(parents=True, exist_ok=True)
-    Base.metadata.create_all(bind=engine)
-    apply_sqlite_migrations(engine)
-    from app.database import SessionLocal
-
-    db = SessionLocal()
-    try:
-        seed_default_admin(db)
-    finally:
-        db.close()
+    db = get_database()
+    ensure_indexes(db)
+    seed_default_admin(db)
     tg_task = asyncio.create_task(_telegram_poll_loop())
     try:
         yield
@@ -60,6 +44,7 @@ async def lifespan(_: FastAPI):
             await tg_task
         except asyncio.CancelledError:
             pass
+        close_mongo_client()
 
 
 app = FastAPI(title="Deal Dashboard API", lifespan=lifespan)

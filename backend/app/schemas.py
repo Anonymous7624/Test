@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from app.models import UserSettings
+from app.domain import UserSettings as UserSettingsRow
 
 
 class Token(BaseModel):
@@ -56,7 +56,7 @@ class UserSettingsOut(BaseModel):
     telegram_verify_pending: bool = False
 
 
-def user_settings_out_from_row(row: UserSettings) -> UserSettingsOut:
+def user_settings_out_from_row(row: UserSettingsRow) -> UserSettingsOut:
     from app.config import settings as app_settings
     from app.services.units import km_to_miles
 

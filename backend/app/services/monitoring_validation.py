@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import TypedDict
 
-from sqlalchemy.orm import Session
-
-from app.models import UserSettings
+from app.domain import UserSettings as UserSettingsRow
 from app.services.categories_service import validate_category_id
 from app.services.units import km_to_miles, miles_to_km
 
@@ -20,11 +18,11 @@ class ReadinessCheck(TypedDict):
     ok: bool
 
 
-def _radius_miles(s: UserSettings) -> float:
+def _radius_miles(s: UserSettingsRow) -> float:
     return km_to_miles(float(s.radius_km))
 
 
-def _location_complete(s: UserSettings) -> bool:
+def _location_complete(s: UserSettingsRow) -> bool:
     return bool(
         (s.geoapify_place_id or "").strip()
         and s.center_lat is not None
@@ -33,14 +31,13 @@ def _location_complete(s: UserSettings) -> bool:
     )
 
 
-def telegram_is_configured(s: UserSettings) -> bool:
+def telegram_is_configured(s: UserSettingsRow) -> bool:
     """True if the user linked Telegram via verification or a saved chat id (manual fallback)."""
     return bool(s.telegram_connected) or bool((s.telegram_chat_id or "").strip())
 
 
-def readiness_checks(db: Session, s: UserSettings) -> list[ReadinessCheck]:
+def readiness_checks(s: UserSettingsRow) -> list[ReadinessCheck]:
     """Structured checklist for UI (✅/❌)."""
-    del db
     loc_ok = _location_complete(s)
     cat_ok = bool(validate_category_id(s.category_id) and (s.category_id or "").strip())
     rad_ok = _radius_miles(s) >= MIN_RADIUS_MILES
@@ -75,9 +72,8 @@ def readiness_checks(db: Session, s: UserSettings) -> list[ReadinessCheck]:
     ]
 
 
-def readiness_errors(db: Session, s: UserSettings) -> list[str]:
+def readiness_errors(s: UserSettingsRow) -> list[str]:
     """Return human-readable blocking reasons (empty if ready)."""
-    del db
     errors: list[str] = []
     if not (s.location_text or "").strip():
         errors.append("Location is required.")
@@ -94,8 +90,8 @@ def readiness_errors(db: Session, s: UserSettings) -> list[str]:
     return errors
 
 
-def is_ready_for_monitoring(db: Session, s: UserSettings) -> bool:
-    return len(readiness_errors(db, s)) == 0
+def is_ready_for_monitoring(s: UserSettingsRow) -> bool:
+    return len(readiness_errors(s)) == 0
 
 
 def validate_radius_miles(miles: float) -> None:

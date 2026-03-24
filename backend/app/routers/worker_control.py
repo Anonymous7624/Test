@@ -1,23 +1,25 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from pymongo.database import Database
 
 from app.database import get_db
 from app.deps import get_current_user
-from app.models import User, UserSettings
+from app.domain import User
 from app.repositories.listing_repository import ListingRepository
+from app.repositories.user_repository import UserRepository
 from app.schemas import WorkerStatus
 from app.services.monitoring_validation import readiness_errors
 
 router = APIRouter(prefix="/worker", tags=["worker"])
 
 
-def _user_settings(db: Session, user: User) -> UserSettings:
-    s = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
+def _user_settings(db: Database, user: User):
+    repo = UserRepository(db)
+    s = repo.get_settings(user.id)
     assert s is not None
     return s
 
 
-def _worker_status_payload(db: Session, user: User) -> WorkerStatus:
+def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
     s = _user_settings(db, user)
     repo = ListingRepository(db)
     listings_n = repo.count_for_user(user.id)
@@ -40,10 +42,11 @@ def _worker_status_payload(db: Session, user: User) -> WorkerStatus:
 @router.post("/run", response_model=WorkerStatus)
 def run_monitoring(
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
 ) -> WorkerStatus:
+    repo = UserRepository(db)
     s = _user_settings(db, user)
-    errors = readiness_errors(db, s)
+    errors = readiness_errors(s)
     if errors:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -53,29 +56,26 @@ def run_monitoring(
     s.monitoring_state = "starting"
     s.backfill_complete = False
     s.last_error = None
-    db.add(s)
-    db.commit()
-    db.refresh(s)
+    repo.replace_settings(s)
     return _worker_status_payload(db, user)
 
 
 @router.post("/stop", response_model=WorkerStatus)
 def stop_monitoring(
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
 ) -> WorkerStatus:
+    repo = UserRepository(db)
     s = _user_settings(db, user)
     s.monitoring_enabled = False
     s.monitoring_state = "idle"
-    db.add(s)
-    db.commit()
-    db.refresh(s)
+    repo.replace_settings(s)
     return _worker_status_payload(db, user)
 
 
 @router.get("/status", response_model=WorkerStatus)
 def worker_status(
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
 ) -> WorkerStatus:
     return _worker_status_payload(db, user)

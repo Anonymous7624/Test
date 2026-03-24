@@ -1,23 +1,52 @@
 from datetime import datetime
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from pymongo import DESCENDING
+from pymongo.database import Database
+from pymongo.errors import DuplicateKeyError
 
-from app.models import AlertStatus, Listing
+from app.domain import Listing
+from app.models import AlertStatus
+from app.mongodb import next_sequence
+
+
+def _listing_from_doc(doc: dict) -> Listing:
+    origin = str(doc.get("origin_type") or doc.get("discovery_source") or "live")
+    return Listing(
+        id=int(doc["id"]),
+        user_id=int(doc["user_id"]),
+        source_url=str(doc.get("source_url") or doc.get("source_link") or ""),
+        source_id=doc.get("source_id"),
+        title=str(doc["title"]),
+        price=float(doc["price"]),
+        estimated_resale=float(doc["estimated_resale"]),
+        estimated_profit=float(doc["estimated_profit"]),
+        category_slug=str(doc["category_slug"]),
+        location=str(doc["location"]),
+        found_at=doc["found_at"],
+        alert_status=str(doc["alert_status"]),
+        source_link=str(doc["source_link"]),
+        source=str(doc.get("source") or "mock"),
+        origin_type=origin,
+        discovery_source=str(doc.get("discovery_source") or origin),
+        profitable=bool(doc.get("profitable", False)),
+        alert_sent=bool(doc.get("alert_sent", doc.get("alert_status") == AlertStatus.sent.value)),
+    )
 
 
 class ListingRepository:
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Database) -> None:
         self.db = db
 
-    def get_by_external_id(self, external_id: str) -> Listing | None:
-        return self.db.scalar(select(Listing).where(Listing.external_id == external_id))
+    def find_by_user_source_url(self, user_id: int, source_url: str) -> Listing | None:
+        doc = self.db["listings"].find_one({"user_id": user_id, "source_url": source_url})
+        return _listing_from_doc(doc) if doc else None
 
     def create(
         self,
         *,
         user_id: int,
-        external_id: str,
+        source_url: str,
+        source_id: str | None,
         title: str,
         price: float,
         estimated_resale: float,
@@ -29,28 +58,37 @@ class ListingRepository:
         profitable: bool,
         alert_status: str,
         found_at: datetime | None = None,
-        discovery_source: str = "live",
-    ) -> Listing:
-        row = Listing(
-            user_id=user_id,
-            external_id=external_id,
-            title=title,
-            price=price,
-            estimated_resale=estimated_resale,
-            estimated_profit=estimated_profit,
-            category_slug=category_slug,
-            location=location,
-            source_link=source_link,
-            source=source,
-            discovery_source=discovery_source,
-            profitable=profitable,
-            alert_status=alert_status,
-            found_at=found_at or datetime.utcnow(),
-        )
-        self.db.add(row)
-        self.db.commit()
-        self.db.refresh(row)
-        return row
+        origin_type: str = "live",
+    ) -> Listing | None:
+        """Insert listing; returns None if duplicate (user_id + source_url)."""
+        lid = next_sequence(self.db, "listings")
+        now = found_at or datetime.utcnow()
+        alert_sent = alert_status == AlertStatus.sent.value
+        doc = {
+            "id": lid,
+            "user_id": user_id,
+            "source_url": source_url,
+            "source_id": source_id,
+            "title": title,
+            "price": price,
+            "estimated_resale": estimated_resale,
+            "estimated_profit": estimated_profit,
+            "category_slug": category_slug,
+            "location": location,
+            "found_at": now,
+            "alert_status": alert_status,
+            "source_link": source_link,
+            "source": source,
+            "origin_type": origin_type,
+            "discovery_source": origin_type,
+            "profitable": profitable,
+            "alert_sent": alert_sent,
+        }
+        try:
+            self.db["listings"].insert_one(doc)
+        except DuplicateKeyError:
+            return None
+        return _listing_from_doc(doc)
 
     def list_filtered(
         self,
@@ -60,25 +98,20 @@ class ListingRepository:
         category_slug: str | None,
         limit: int = 200,
     ) -> list[Listing]:
-        q = (
-            select(Listing)
-            .where(Listing.user_id == user_id)
-            .order_by(Listing.found_at.desc())
-        )
+        q: dict = {"user_id": user_id}
         if profitable_only:
-            q = q.where(Listing.profitable.is_(True))
+            q["profitable"] = True
         if category_slug:
-            q = q.where(Listing.category_slug == category_slug)
-        return list(self.db.scalars(q.limit(limit)))
+            q["category_slug"] = category_slug
+        cur = self.db["listings"].find(q).sort([("found_at", DESCENDING)]).limit(limit)
+        return [_listing_from_doc(d) for d in cur]
 
     def count_for_user(self, user_id: int) -> int:
-        q = select(func.count()).select_from(Listing).where(Listing.user_id == user_id)
-        return int(self.db.scalar(q) or 0)
+        return int(self.db["listings"].count_documents({"user_id": user_id}))
 
     def count_alerts_sent(self, user_id: int) -> int:
-        q = (
-            select(func.count())
-            .select_from(Listing)
-            .where(Listing.user_id == user_id, Listing.alert_status == AlertStatus.sent.value)
+        return int(
+            self.db["listings"].count_documents(
+                {"user_id": user_id, "alert_status": AlertStatus.sent.value}
+            )
         )
-        return int(self.db.scalar(q) or 0)
