@@ -52,6 +52,20 @@ pip install -r requirements.txt
 
 Worker imports `app` from `backend/`; run it with **current working directory = `backend/`** so the SQLite path in `DATABASE_URL` matches the API.
 
+### Facebook Marketplace (Playwright auth, one-time)
+
+The worker loads Facebook session cookies from `backend/playwright/.auth/facebook.json`. That file is **not** created by the app; run a separate bootstrap once:
+
+1. From the **repository root**, with Playwright installed (`pip install -r worker/requirements.txt` and `playwright install chromium` in your venv):
+
+   `python facebook_login_bootstrap.py`
+
+2. Log in manually in the opened Chromium window (2FA as needed).
+
+3. When finished, focus the terminal and **press Enter** to save the auth state.
+
+Later runs of the worker reuse that file. If the file is missing, the worker fails with a message pointing you to this step. Login is not triggered from the frontend or API startup.
+
 ## Running locally (three terminals)
 
 **Terminal A — API** (from `backend/`):

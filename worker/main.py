@@ -28,6 +28,10 @@ from app.database import get_database  # noqa: E402
 from app.domain import UserSettings as UserSettingsRow  # noqa: E402
 from app.mongodb import ensure_indexes  # noqa: E402
 from app.repositories.user_repository import UserRepository, settings_from_doc  # noqa: E402
+from collector.playwright_collector import (  # noqa: E402
+    FacebookAuthStateMissingError,
+    fetch_listings_playwright,
+)
 from mock_scraper import RawListing, mock_fetch_backfill, mock_fetch_batch  # noqa: E402
 from pipeline import process_batch  # noqa: E402
 from search_context import build_search_location_hint  # noqa: E402
@@ -36,9 +40,9 @@ from search_context import build_search_location_hint  # noqa: E402
 def _collect_raws(profile: UserSettingsRow, *, backfill: bool) -> list[RawListing]:
     hint = build_search_location_hint(profile)
     try:
-        from collector.playwright_collector import fetch_listings_playwright
-
         return fetch_listings_playwright(backfill=backfill)
+    except FacebookAuthStateMissingError:
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"Playwright collector failed, using mock data: {exc}", flush=True)
         if backfill:

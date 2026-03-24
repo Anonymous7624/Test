@@ -1,5 +1,6 @@
 .env
 .env.local
+backend/playwright/.auth/*.json
 backend/data/
 backend/.env
 frontend/.env.local
