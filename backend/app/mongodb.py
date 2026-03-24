@@ -43,7 +43,6 @@ def get_db() -> Generator[Database, None, None]:
 
 def ensure_indexes(db: Database) -> None:
     """Idempotent index creation on startup."""
-    db["counters"].create_index("_id", unique=True)
     db["users"].create_index("id", unique=True)
     db["users"].create_index("username", unique=True)
     db["user_settings"].create_index("user_id", unique=True)
