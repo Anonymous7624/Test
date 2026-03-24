@@ -46,6 +46,11 @@ class Settings(BaseSettings):
 
     # Telegram Bot API (server only; users link chat via Settings UI)
     telegram_bot_token: str = Field(default="", validation_alias="TELEGRAM_BOT_TOKEN")
+    # Public @username for in-app instructions (no secret)
+    telegram_bot_username: str = Field(
+        default="Facebookcatching_bot",
+        validation_alias="TELEGRAM_BOT_USERNAME",
+    )
 
 
 settings = Settings()

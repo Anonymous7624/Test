@@ -17,7 +17,12 @@ from app.schemas import (
 )
 from app.services.categories_service import validate_category_id
 from app.services.location_service import LocationResolutionError, resolve_location_for_save
-from app.services.monitoring_validation import readiness_errors, validate_max_price_usd, validate_radius_miles
+from app.services.monitoring_validation import (
+    readiness_checks,
+    readiness_errors,
+    validate_max_price_usd,
+    validate_radius_miles,
+)
 from app.services.telegram_service import send_test_message
 from app.services.units import km_to_miles, miles_to_km
 
@@ -54,7 +59,8 @@ def monitoring_readiness(
 ) -> dict:
     row = _get_settings_row(db, user)
     errs = readiness_errors(db, row)
-    return {"ready": len(errs) == 0, "errors": errs}
+    checks = readiness_checks(db, row)
+    return {"ready": len(errs) == 0, "errors": errs, "checks": checks}
 
 
 @router.get("/me", response_model=UserSettingsOut)
@@ -153,10 +159,18 @@ def start_telegram_verification(
     db.add(row)
     db.commit()
     db.refresh(row)
+    bot_u = (settings.telegram_bot_username or "").strip().lstrip("@") or "Facebookcatching_bot"
+    bot_at = f"@{bot_u}"
+    start_cmd = f"/start {code}"
+    instructions = (
+        f"1) Open Telegram. 2) Search for {bot_at}. 3) Open the chat and send this exact line: {start_cmd}"
+    )
     return TelegramVerificationStart(
         code=code,
         expires_at=exp,
-        instructions='Open Telegram, open your bot, and send: /start ' + code,
+        instructions=instructions,
+        bot_username=bot_at,
+        start_command=start_cmd,
     )
 
 

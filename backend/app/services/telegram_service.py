@@ -43,10 +43,14 @@ def send_verification_success(chat_id: str) -> None:
     token = _bot_token()
     if not token or not str(chat_id).strip():
         return
+    cid = str(chat_id).strip()
     _send_message(
         token,
-        str(chat_id).strip(),
-        "Deal dashboard: Telegram linked. You will receive profit alerts here.",
+        cid,
+        (
+            "Deal dashboard: Telegram linked successfully. You will receive profit alerts here.\n"
+            f"Your chat id (for reference): {cid}"
+        ),
     )
 
 

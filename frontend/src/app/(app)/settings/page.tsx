@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/context/auth-context";
 import { GeoapifyLocationInput } from "@/components/geoapify-location-input";
 import {
@@ -24,9 +24,12 @@ export default function SettingsPage() {
   const [categoryOptions, setCategoryOptions] = useState<{ id: string; label: string }[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
   const [telegramMsg, setTelegramMsg] = useState<string | null>(null);
-  const [verifyInfo, setVerifyInfo] = useState<{ code: string; instructions: string; expiresAt: string } | null>(
-    null,
-  );
+  const [verifyInfo, setVerifyInfo] = useState<{
+    code: string;
+    instructions: string;
+    expiresAt: string;
+    startCommand: string;
+  } | null>(null);
   const [readiness, setReadiness] = useState<MonitoringReadiness | null>(null);
   const [worker, setWorker] = useState<WorkerStatusPayload | null>(null);
   const [runErr, setRunErr] = useState<string | null>(null);
@@ -50,13 +53,22 @@ export default function SettingsPage() {
   }, [loadAll]);
 
   useEffect(() => {
+    if (settings?.telegram_connected) setVerifyInfo(null);
+  }, [settings?.telegram_connected]);
+
+  useEffect(() => {
     if (!token) return;
     const id = window.setInterval(() => {
       void (async () => {
         try {
-          const [st, rd] = await Promise.all([workerStatus(token), fetchMonitoringReadiness(token)]);
+          const [st, rd, s] = await Promise.all([
+            workerStatus(token),
+            fetchMonitoringReadiness(token),
+            fetchSettings(token),
+          ]);
           setWorker(st);
           setReadiness(rd);
+          setSettings(s);
         } catch {
           /* ignore */
         }
@@ -82,10 +94,7 @@ export default function SettingsPage() {
     }
   }
 
-  const checklist = useMemo(() => {
-    const errs = readiness?.errors ?? [];
-    return errs.length === 0 ? null : errs;
-  }, [readiness]);
+  const readinessRows = readiness?.checks ?? [];
 
   if (!settings) {
     return <p className="text-zinc-500">Loading…</p>;
@@ -218,31 +227,97 @@ export default function SettingsPage() {
 
           <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-sm font-medium text-zinc-200">Telegram</h2>
+              <h2 className="text-sm font-medium text-zinc-200">Telegram alerts</h2>
               <span
                 className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
                   settings.telegram_connected
                     ? "bg-emerald-900/60 text-emerald-200"
-                    : "bg-zinc-800 text-zinc-400"
+                    : settings.telegram_verify_pending
+                      ? "bg-amber-900/50 text-amber-200"
+                      : "bg-zinc-800 text-zinc-400"
                 }`}
               >
-                {settings.telegram_connected ? "Connected" : "Not connected"}
+                {settings.telegram_connected
+                  ? "Connected"
+                  : settings.telegram_verify_pending
+                    ? "Verification pending"
+                    : "Not connected"}
               </span>
             </div>
-            <p className="mt-2 text-xs text-zinc-500">
-              Bot token stays in backend <code className="text-zinc-400">TELEGRAM_BOT_TOKEN</code> only. Link your
-              chat with a one-time code.
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              Profit alerts are sent by our Telegram bot. The bot token is only stored on the server (
+              <code className="text-zinc-500">TELEGRAM_BOT_TOKEN</code>). You link your personal Telegram chat with a
+              one-time code — no need to paste a chat ID unless you use the optional fallback below.
             </p>
+            <div className="mt-3 rounded-lg border border-zinc-700/80 bg-zinc-900/40 px-3 py-2 text-xs text-zinc-300">
+              <p className="font-medium text-zinc-200">Link Telegram (recommended)</p>
+              <ol className="mt-2 list-decimal space-y-1.5 pl-4 text-zinc-400">
+                <li>Open the Telegram app (phone or desktop).</li>
+                <li>
+                  Search for the bot{" "}
+                  <span className="font-mono text-emerald-300/95">{settings.telegram_bot_username}</span> and open the
+                  chat.
+                </li>
+                <li>
+                  Tap Start or use the exact command shown below (copy it). The server will save your chat
+                  automatically.
+                </li>
+              </ol>
+            </div>
             {settings.telegram_verify_pending && !settings.telegram_connected ? (
-              <p className="mt-2 text-xs text-amber-400/90">Verification code pending — complete in Telegram before it expires.</p>
+              <p className="mt-2 text-xs text-amber-400/90">
+                Code pending — open the bot and send the command before it expires.
+              </p>
+            ) : null}
+            {verifyInfo && !settings.telegram_verify_pending && !settings.telegram_connected ? (
+              <p className="mt-2 text-xs text-zinc-500">
+                This verification code is no longer active (expired or replaced). Generate a new one.
+              </p>
             ) : null}
             {verifyInfo ? (
-              <div className="mt-3 rounded-lg border border-emerald-900/40 bg-emerald-950/20 px-3 py-2 text-xs text-zinc-300">
-                <p className="font-mono text-sm text-emerald-300">/start {verifyInfo.code}</p>
-                <p className="mt-1 text-zinc-400">{verifyInfo.instructions}</p>
-                <p className="mt-1 text-[11px] text-zinc-500">Expires {new Date(verifyInfo.expiresAt).toLocaleString()}</p>
+              <div className="mt-3 space-y-2 rounded-lg border border-emerald-900/40 bg-emerald-950/25 px-3 py-3">
+                <p className="text-[11px] font-medium uppercase tracking-wide text-emerald-400/90">Send this command</p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <code className="block flex-1 min-w-[12rem] rounded border border-emerald-900/50 bg-zinc-950 px-3 py-2 font-mono text-sm text-emerald-200">
+                    {verifyInfo.startCommand}
+                  </code>
+                  <button
+                    type="button"
+                    className="shrink-0 rounded-lg bg-emerald-800 px-3 py-2 text-xs font-medium text-white"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(verifyInfo.startCommand);
+                      setTelegramMsg("Command copied to clipboard.");
+                    }}
+                  >
+                    Copy
+                  </button>
+                </div>
+                <p className="text-xs text-zinc-500">{verifyInfo.instructions}</p>
+                <p className="text-[11px] text-zinc-500">Expires {new Date(verifyInfo.expiresAt).toLocaleString()}</p>
               </div>
             ) : null}
+            <div className="mt-4 border-t border-zinc-800 pt-4">
+              <label className="block text-xs text-zinc-500">
+                Manual chat ID <span className="text-zinc-600">(optional fallback / debug)</span>
+              </label>
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="off"
+                placeholder="Only if you cannot use verification — paste numeric chat id"
+                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono text-sm"
+                value={settings.telegram_chat_id ?? ""}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    telegram_chat_id: e.target.value.trim() === "" ? null : e.target.value.trim(),
+                  })
+                }
+              />
+              <p className="mt-1 text-[11px] text-zinc-600">
+                Save settings after editing. If set, Run treats Telegram as configured without the /start code flow.
+              </p>
+            </div>
             <div className="mt-3 flex flex-wrap gap-2">
               <button
                 type="button"
@@ -256,10 +331,13 @@ export default function SettingsPage() {
                       code: v.code,
                       instructions: v.instructions,
                       expiresAt: v.expires_at,
+                      startCommand: v.start_command,
                     });
                     const next = await fetchSettings(token);
                     setSettings(next);
-                    setTelegramMsg("Code generated. Send the command to your bot in Telegram.");
+                    const rd = await fetchMonitoringReadiness(token);
+                    setReadiness(rd);
+                    setTelegramMsg(`Code ready — send it to ${next.telegram_bot_username} in Telegram.`);
                   } catch (e) {
                     setTelegramMsg(e instanceof Error ? e.message : "Could not start verification.");
                   }
@@ -288,18 +366,34 @@ export default function SettingsPage() {
             {telegramMsg && <p className="mt-2 text-sm text-zinc-400">{telegramMsg}</p>}
           </div>
 
-          {checklist ? (
-            <div className="rounded-lg border border-amber-900/40 bg-amber-950/20 px-3 py-2 text-xs text-amber-100/90">
-              <p className="font-medium text-amber-200">Before Run, complete:</p>
-              <ul className="mt-2 list-inside list-disc space-y-1">
-                {checklist.map((c) => (
-                  <li key={c}>{c}</li>
+          <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-3">
+            <p className="text-xs font-medium text-zinc-300">Run requirements</p>
+            {!readiness ? (
+              <p className="mt-2 text-xs text-zinc-500">Loading readiness…</p>
+            ) : readinessRows.length > 0 ? (
+              <ul className="mt-2 space-y-1.5">
+                {readinessRows.map((c) => (
+                  <li key={c.id} className="flex items-start gap-2 text-xs">
+                    <span className="select-none" aria-hidden>
+                      {c.ok ? "✅" : "❌"}
+                    </span>
+                    <span className={c.ok ? "text-zinc-400" : "text-amber-200/95"}>{c.label}</span>
+                  </li>
                 ))}
               </ul>
-            </div>
-          ) : (
-            <p className="text-xs text-emerald-500/90">All required checks pass — you can start monitoring.</p>
-          )}
+            ) : (
+              <ul className="mt-2 space-y-1 text-xs text-amber-100/90">
+                {(readiness.errors ?? []).map((err) => (
+                  <li key={err}>• {err}</li>
+                ))}
+              </ul>
+            )}
+            {readiness?.ready ? (
+              <p className="mt-3 text-xs text-emerald-500/90">All checks pass — you can run monitoring.</p>
+            ) : readiness ? (
+              <p className="mt-3 text-xs text-amber-200/80">Fix every item marked ❌ (and save settings if you changed them).</p>
+            ) : null}
+          </div>
 
           <div className="flex flex-wrap gap-2">
             <button

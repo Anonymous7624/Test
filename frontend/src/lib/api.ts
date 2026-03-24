@@ -41,6 +41,7 @@ export type UserSettings = {
   radius_miles: number;
   category_id: string;
   max_price: number;
+  telegram_bot_username: string;
   telegram_chat_id: string | null;
   telegram_connected: boolean;
   monitoring_enabled: boolean;
@@ -191,7 +192,13 @@ export async function workerStatus(token: string) {
   return res.json() as Promise<WorkerStatusPayload>;
 }
 
-export type MonitoringReadiness = { ready: boolean; errors: string[] };
+export type ReadinessCheck = { id: string; label: string; ok: boolean };
+
+export type MonitoringReadiness = {
+  ready: boolean;
+  errors: string[];
+  checks?: ReadinessCheck[];
+};
 
 export async function fetchMonitoringReadiness(token: string): Promise<MonitoringReadiness> {
   const res = await fetch(`${API_BASE}/settings/monitoring-readiness`, { headers: headers(token) });
@@ -203,6 +210,8 @@ export type TelegramVerificationStart = {
   code: string;
   expires_at: string;
   instructions: string;
+  bot_username: string;
+  start_command: string;
 };
 
 export async function startTelegramVerification(token: string): Promise<TelegramVerificationStart> {

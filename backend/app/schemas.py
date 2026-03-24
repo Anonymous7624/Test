@@ -39,6 +39,7 @@ class UserSettingsOut(BaseModel):
     radius_miles: float
     category_id: str
     max_price: float
+    telegram_bot_username: str
     telegram_chat_id: str | None
     telegram_connected: bool
     monitoring_enabled: bool
@@ -52,13 +53,17 @@ class UserSettingsOut(BaseModel):
 
 
 def user_settings_out_from_row(row: UserSettings) -> UserSettingsOut:
+    from app.config import settings as app_settings
     from app.services.units import km_to_miles
+
+    bot_u = (app_settings.telegram_bot_username or "").strip().lstrip("@") or "Facebookcatching_bot"
 
     pending = bool(
         row.telegram_verify_code
         and row.telegram_verify_expires_at
         and row.telegram_verify_expires_at > datetime.utcnow()
     )
+    has_chat = bool((row.telegram_chat_id or "").strip())
     return UserSettingsOut(
         location_text=row.location_text,
         center_lat=row.center_lat,
@@ -67,8 +72,9 @@ def user_settings_out_from_row(row: UserSettings) -> UserSettingsOut:
         radius_miles=round(km_to_miles(float(row.radius_km)), 4),
         category_id=row.category_id,
         max_price=float(row.max_price),
+        telegram_bot_username=f"@{bot_u}",
         telegram_chat_id=row.telegram_chat_id,
-        telegram_connected=bool(row.telegram_connected),
+        telegram_connected=bool(row.telegram_connected) or has_chat,
         monitoring_enabled=bool(row.monitoring_enabled),
         monitoring_state=getattr(row, "monitoring_state", None) or "idle",
         last_checked_at=getattr(row, "last_checked_at", None),
@@ -150,3 +156,5 @@ class TelegramVerificationStart(BaseModel):
     code: str
     expires_at: datetime
     instructions: str
+    bot_username: str
+    start_command: str
