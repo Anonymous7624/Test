@@ -16,6 +16,7 @@ class ListingRepository:
     def create(
         self,
         *,
+        user_id: int,
         external_id: str,
         title: str,
         price: float,
@@ -30,6 +31,7 @@ class ListingRepository:
         found_at: datetime | None = None,
     ) -> Listing:
         row = Listing(
+            user_id=user_id,
             external_id=external_id,
             title=title,
             price=price,
@@ -51,11 +53,16 @@ class ListingRepository:
     def list_filtered(
         self,
         *,
+        user_id: int,
         profitable_only: bool | None,
         category_slug: str | None,
         limit: int = 200,
     ) -> list[Listing]:
-        q = select(Listing).order_by(Listing.found_at.desc())
+        q = (
+            select(Listing)
+            .where(Listing.user_id == user_id)
+            .order_by(Listing.found_at.desc())
+        )
         if profitable_only:
             q = q.where(Listing.profitable.is_(True))
         if category_slug:

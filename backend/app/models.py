@@ -42,8 +42,8 @@ class UserSettings(Base):
     radius_km: Mapped[float] = mapped_column(Float, default=25.0)
     category_id: Mapped[str] = mapped_column(String(64), default="general")
     max_price: Mapped[float] = mapped_column(Float, default=10_000.0)
-    telegram_bot_token: Mapped[str | None] = mapped_column(String(256), nullable=True)
     telegram_chat_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    telegram_connected: Mapped[bool] = mapped_column(Boolean, default=False)
     monitoring_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
     user: Mapped["User"] = relationship("User", back_populates="settings")
@@ -53,7 +53,8 @@ class Listing(Base):
     __tablename__ = "listings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    external_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    external_id: Mapped[str] = mapped_column(String(160), unique=True, index=True)
     title: Mapped[str] = mapped_column(String(512))
     price: Mapped[float] = mapped_column(Float)
     estimated_resale: Mapped[float] = mapped_column(Float)

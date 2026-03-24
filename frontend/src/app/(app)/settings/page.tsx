@@ -5,6 +5,7 @@ import { useAuth } from "@/context/auth-context";
 import {
   fetchCategories,
   fetchSettings,
+  sendTelegramTest,
   updateSettings,
   workerRun,
   workerStatus,
@@ -17,6 +18,7 @@ export default function SettingsPage() {
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [categoryOptions, setCategoryOptions] = useState<{ id: string; label: string }[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
+  const [telegramMsg, setTelegramMsg] = useState<string | null>(null);
   const [workerMsg, setWorkerMsg] = useState<string>("");
 
   useEffect(() => {
@@ -94,32 +96,72 @@ export default function SettingsPage() {
             onChange={(e) => setSettings({ ...settings, max_price: Number(e.target.value) })}
           />
         </div>
-        <div>
-          <label className="block text-xs text-zinc-500">Telegram bot token (optional)</label>
-          <input
-            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
-            value={settings.telegram_bot_token ?? ""}
-            onChange={(e) =>
-              setSettings({
-                ...settings,
-                telegram_bot_token: e.target.value || null,
-              })
-            }
-            placeholder="Set in backend env for worker stub, or store per-user later"
-          />
-        </div>
-        <div>
-          <label className="block text-xs text-zinc-500">Telegram chat id / target (optional)</label>
-          <input
-            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
-            value={settings.telegram_chat_id ?? ""}
-            onChange={(e) =>
-              setSettings({
-                ...settings,
-                telegram_chat_id: e.target.value || null,
-              })
-            }
-          />
+        <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-4">
+          <h2 className="text-sm font-medium text-zinc-200">Telegram</h2>
+          <p className="mt-1 text-xs text-zinc-500">
+            Set the bot token only in backend <code className="text-zinc-400">TELEGRAM_BOT_TOKEN</code>. Your
+            personal chat id is stored here.
+          </p>
+          <div className="mt-3">
+            <label className="block text-xs text-zinc-500">Chat ID</label>
+            <input
+              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+              value={settings.telegram_chat_id ?? ""}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  telegram_chat_id: e.target.value || null,
+                })
+              }
+              placeholder="e.g. numeric ID from @userinfobot"
+            />
+          </div>
+          <p className="mt-2 text-xs text-zinc-400">
+            Status:{" "}
+            {settings.telegram_connected ? (
+              <span className="text-emerald-400">Connected (chat id saved)</span>
+            ) : (
+              <span className="text-zinc-500">Not connected</span>
+            )}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rounded-lg bg-emerald-700 px-4 py-2 text-sm"
+              onClick={async () => {
+                if (!token) return;
+                setTelegramMsg(null);
+                try {
+                  const next = await updateSettings(token, {
+                    telegram_chat_id: settings.telegram_chat_id,
+                  });
+                  setSettings(next);
+                  setTelegramMsg("Telegram settings saved.");
+                } catch {
+                  setTelegramMsg("Save failed.");
+                }
+              }}
+            >
+              Save Telegram
+            </button>
+            <button
+              type="button"
+              className="rounded-lg bg-zinc-800 px-4 py-2 text-sm"
+              onClick={async () => {
+                if (!token) return;
+                setTelegramMsg(null);
+                try {
+                  await sendTelegramTest(token);
+                  setTelegramMsg("Test message sent.");
+                } catch (e) {
+                  setTelegramMsg(e instanceof Error ? e.message : "Test failed.");
+                }
+              }}
+            >
+              Send test message
+            </button>
+          </div>
+          {telegramMsg && <p className="mt-2 text-sm text-zinc-400">{telegramMsg}</p>}
         </div>
         <div className="flex flex-wrap gap-2">
           <button

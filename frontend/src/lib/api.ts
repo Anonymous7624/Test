@@ -36,8 +36,8 @@ export type UserSettings = {
   radius_km: number;
   category_id: string;
   max_price: number;
-  telegram_bot_token: string | null;
   telegram_chat_id: string | null;
+  telegram_connected: boolean;
   monitoring_enabled: boolean;
 };
 
@@ -97,6 +97,23 @@ export async function updateSettings(
   });
   if (!res.ok) throw new Error("Failed to save settings");
   return res.json() as Promise<UserSettings>;
+}
+
+export async function sendTelegramTest(token: string): Promise<{ ok: boolean; message: string }> {
+  const res = await fetch(`${API_BASE}/settings/telegram/test`, {
+    method: "POST",
+    headers: headers(token),
+  });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => null)) as {
+      detail?: string | { msg: string }[];
+    } | null;
+    let detail = res.statusText;
+    if (typeof err?.detail === "string") detail = err.detail;
+    else if (Array.isArray(err?.detail) && err.detail[0]?.msg) detail = err.detail[0].msg;
+    throw new Error(detail);
+  }
+  return res.json() as Promise<{ ok: boolean; message: string }>;
 }
 
 export async function fetchCategories(): Promise<{ categories: Category[] }> {

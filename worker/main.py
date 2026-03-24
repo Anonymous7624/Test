@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 from app.config import settings  # noqa: E402
 from app.database import Base, SessionLocal, engine  # noqa: E402
+from app.migrate_sqlite import apply_sqlite_migrations  # noqa: E402
 from app.models import User, UserSettings  # noqa: E402
 from mock_scraper import mock_fetch_batch  # noqa: E402
 from pipeline import process_batch  # noqa: E402
@@ -45,7 +46,12 @@ def tick() -> None:
                 max_price=s.max_price,
             )
             if raws:
-                process_batch(db, raws)
+                process_batch(
+                    db,
+                    raws,
+                    owner_user_id=s.user_id,
+                    telegram_chat_id=s.telegram_chat_id,
+                )
     finally:
         db.close()
 
@@ -54,6 +60,7 @@ async def main_loop() -> None:
     # Same cwd convention as API: run worker from `backend/` so SQLite path matches.
     Path("data").mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
+    apply_sqlite_migrations(engine)
     interval = float(__import__("os").environ.get("WORKER_POLL_SECONDS", "8"))
     print(f"Worker started. DATABASE_URL={settings.database_url} poll={interval}s", flush=True)
     while True:

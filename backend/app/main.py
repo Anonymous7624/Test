@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import Base, engine
+from app.migrate_sqlite import apply_sqlite_migrations
 from app.routers import admin, auth, categories, listings, settings as settings_router, worker_control
 from app.seed import seed_default_admin
 
@@ -25,6 +26,7 @@ async def lifespan(_: FastAPI):
         seed_default_admin(db)
     finally:
         db.close()
+    apply_sqlite_migrations(engine)
     yield
 
 

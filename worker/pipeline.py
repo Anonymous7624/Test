@@ -8,7 +8,7 @@ from datetime import datetime
 from app.models import AlertStatus
 from app.repositories.listing_repository import ListingRepository
 from app.services.profit_estimation import estimate_profit
-from app.services.telegram_service import config_from_env, send_alert
+from app.services.telegram_service import send_profit_alert
 from sqlalchemy.orm import Session
 
 from mock_scraper import RawListing
@@ -25,10 +25,10 @@ class NormalizedListing:
     source: str
 
 
-def normalize(raw: RawListing) -> NormalizedListing:
+def normalize(raw: RawListing, owner_user_id: int) -> NormalizedListing:
     ext = raw.source_link.rsplit("/", maxsplit=1)[-1]
     return NormalizedListing(
-        external_id=f"{raw.source}:{ext}",
+        external_id=f"u{owner_user_id}:{raw.source}:{ext}",
         title=raw.title.strip(),
         price=raw.price,
         location=raw.location.strip(),
@@ -38,22 +38,32 @@ def normalize(raw: RawListing) -> NormalizedListing:
     )
 
 
-def process_batch(db: Session, raws: list[RawListing]) -> int:
+def process_batch(
+    db: Session,
+    raws: list[RawListing],
+    *,
+    owner_user_id: int,
+    telegram_chat_id: str | None,
+) -> int:
     """Insert new listings; returns count inserted."""
     repo = ListingRepository(db)
     inserted = 0
-    cfg = config_from_env()
     for raw in raws:
-        norm = normalize(raw)
+        norm = normalize(raw, owner_user_id)
         if repo.get_by_external_id(norm.external_id):
             continue
         est = estimate_profit(norm.price, norm.category_slug)
         alert_status = AlertStatus.none.value
         if est.profitable:
-            # TODO: send Telegram using per-user token/chat from UserSettings when wired
-            sent = bool(cfg.bot_token and cfg.chat_id and send_alert(norm.title, norm.source_link, est.estimated_profit))
+            sent = send_profit_alert(
+                chat_id=telegram_chat_id,
+                title=norm.title,
+                source_link=norm.source_link,
+                estimated_profit=est.estimated_profit,
+            )
             alert_status = AlertStatus.sent.value if sent else AlertStatus.pending.value
         repo.create(
+            user_id=owner_user_id,
             external_id=norm.external_id,
             title=norm.title,
             price=norm.price,

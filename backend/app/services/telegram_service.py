@@ -1,38 +1,51 @@
 """
-Telegram alert abstraction.
-
-TODO: Implement Bot API sendMessage using telegram_bot_token + telegram_chat_id from user settings.
-TODO: Add retry/backoff and rate limiting for production.
-TODO: Wire Cloudflare Tunnel or public webhook URL if Telegram cannot reach localhost.
-
-For now: read TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID from env in worker or call send_alert stub.
+Telegram Bot API (sendMessage). Bot token from TELEGRAM_BOT_TOKEN env only; chat from user settings.
 """
 
+from __future__ import annotations
+
 import os
-from dataclasses import dataclass
+
+import httpx
+
+TELEGRAM_API = "https://api.telegram.org"
 
 
-@dataclass
-class TelegramConfig:
-    bot_token: str | None
-    chat_id: str | None
+def _send_message(bot_token: str, chat_id: str, text: str) -> tuple[bool, str | None]:
+    url = f"{TELEGRAM_API}/bot{bot_token}/sendMessage"
+    try:
+        r = httpx.post(
+            url,
+            json={"chat_id": chat_id, "text": text},
+            timeout=20.0,
+        )
+        if r.is_success:
+            return True, None
+        return False, r.text
+    except Exception as exc:  # noqa: BLE001 — surface to API caller
+        return False, str(exc)
 
 
-def config_from_env() -> TelegramConfig:
-    return TelegramConfig(
-        bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
-        chat_id=os.getenv("TELEGRAM_CHAT_ID"),
-    )
+def send_test_message(chat_id: str) -> tuple[bool, str | None]:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token or not chat_id.strip():
+        return False, "Missing bot token or chat id"
+    return _send_message(token, chat_id.strip(), "Deal dashboard: Telegram test message OK.")
 
 
-def send_alert(title: str, source_link: str, estimated_profit: float) -> bool:
-    """
-    Placeholder: returns True if env vars present (simulated send).
-    TODO: httpx POST to https://api.telegram.org/bot{token}/sendMessage
-    """
-    cfg = config_from_env()
-    if not cfg.bot_token or not cfg.chat_id:
+def send_profit_alert(
+    *,
+    chat_id: str | None,
+    title: str,
+    source_link: str,
+    estimated_profit: float,
+) -> bool:
+    """Sends alert to the given chat using TELEGRAM_BOT_TOKEN from the environment."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token or not chat_id or not str(chat_id).strip():
         return False
-    # TODO: implement real API call; keep stub to avoid network in dev by default
-    _ = (title, source_link, estimated_profit)
-    return True
+    text = (
+        f"Profit alert\n{title}\nEst. profit: {estimated_profit:.2f}\n{source_link}"
+    )
+    ok, _ = _send_message(token, str(chat_id).strip(), text)
+    return ok

@@ -17,7 +17,10 @@ def list_listings(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[ListingOut]:
-    _ = user
     repo = ListingRepository(db)
-    rows = repo.list_filtered(profitable_only=profitable_only, category_slug=category)
+    rows = repo.list_filtered(
+        user_id=user.id,
+        profitable_only=profitable_only,
+        category_slug=category,
+    )
     return [ListingOut.model_validate(r) for r in rows]
