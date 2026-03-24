@@ -4,8 +4,9 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.deps import get_current_user
 from app.models import User
-from app.schemas import LoginRequest, LoginResponse, UserPublic
-from app.services.auth_service import authenticate_user, create_access_token
+from app.repositories.user_repository import UserRepository
+from app.schemas import DeleteAccountRequest, LoginRequest, LoginResponse, UserPublic
+from app.services.auth_service import authenticate_user, create_access_token, verify_password
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -25,3 +26,16 @@ def login(body: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
 @router.get("/me", response_model=UserPublic)
 def me(user: User = Depends(get_current_user)) -> UserPublic:
     return UserPublic.model_validate(user)
+
+
+@router.post("/delete-account")
+def delete_account(
+    body: DeleteAccountRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    if not verify_password(body.password, user.password_hash):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid password")
+    repo = UserRepository(db)
+    repo.delete(user)
+    return {"ok": True}

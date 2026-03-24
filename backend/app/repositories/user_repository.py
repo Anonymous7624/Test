@@ -1,7 +1,7 @@
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.models import User, UserRole, UserSettings
+from app.models import Listing, User, UserRole, UserSettings
 
 
 class UserRepository:
@@ -28,5 +28,6 @@ class UserRepository:
         return list(self.db.scalars(select(User).order_by(User.id)))
 
     def delete(self, user: User) -> None:
+        self.db.execute(delete(Listing).where(Listing.user_id == user.id))
         self.db.delete(user)
         self.db.commit()

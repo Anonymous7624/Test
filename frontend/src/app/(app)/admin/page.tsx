@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
-import { adminCreateUser, adminListUsers, type AdminUser } from "@/lib/api";
+import { adminCreateUser, adminDeleteUser, adminListUsers, type AdminUser } from "@/lib/api";
 
 export default function AdminPage() {
   const { token, user } = useAuth();
@@ -32,8 +32,8 @@ export default function AdminPage() {
       setUsername("");
       setPassword("");
       setRows(await adminListUsers(token));
-    } catch {
-      setErr("Create failed (duplicate username?).");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Create failed.");
     }
   }
 
@@ -85,6 +85,7 @@ export default function AdminPage() {
               <th className="px-3 py-2">Username</th>
               <th className="px-3 py-2">Role</th>
               <th className="px-3 py-2">Created</th>
+              <th className="px-3 py-2">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -94,6 +95,35 @@ export default function AdminPage() {
                 <td className="px-3 py-2">{r.username}</td>
                 <td className="px-3 py-2">{r.role}</td>
                 <td className="px-3 py-2 text-zinc-400">{new Date(r.created_at).toLocaleString()}</td>
+                <td className="px-3 py-2">
+                  {user?.id === r.id ? (
+                    <span className="text-xs text-zinc-600">Current session</span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="text-xs text-red-400 hover:underline"
+                      onClick={async () => {
+                        if (!token) return;
+                        if (
+                          !window.confirm(
+                            `Delete user "${r.username}"? Their listings and settings will be removed. This cannot be undone.`,
+                          )
+                        ) {
+                          return;
+                        }
+                        setErr(null);
+                        try {
+                          await adminDeleteUser(token, r.id);
+                          setRows(await adminListUsers(token));
+                        } catch (e) {
+                          setErr(e instanceof Error ? e.message : "Delete failed.");
+                        }
+                      }}
+                    >
+                      Delete
+                    </button>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>

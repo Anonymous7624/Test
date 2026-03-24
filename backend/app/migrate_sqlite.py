@@ -59,6 +59,13 @@ def apply_sqlite_migrations(engine: Engine) -> None:
                     "AND location IS NOT NULL AND TRIM(location) != ''"
                 )
             )
+        # Legacy NOT NULL `location` breaks ORM inserts that only set location_text; drop after backfill.
+        us_after_loc = {r[1] for r in conn.execute(text("PRAGMA table_info(user_settings)")).fetchall()}
+        if "location" in us_after_loc:
+            try:
+                conn.execute(text("ALTER TABLE user_settings DROP COLUMN location"))
+            except Exception:
+                pass
 
         us_cols6 = {r[1] for r in conn.execute(text("PRAGMA table_info(user_settings)")).fetchall()}
         for col_name, ddl in [

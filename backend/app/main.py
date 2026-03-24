@@ -43,6 +43,7 @@ async def lifespan(_: FastAPI):
     log_telegram_token_diagnostic()
     Path("data").mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
+    apply_sqlite_migrations(engine)
     from app.database import SessionLocal
 
     db = SessionLocal()
@@ -50,7 +51,6 @@ async def lifespan(_: FastAPI):
         seed_default_admin(db)
     finally:
         db.close()
-    apply_sqlite_migrations(engine)
     tg_task = asyncio.create_task(_telegram_poll_loop())
     try:
         yield

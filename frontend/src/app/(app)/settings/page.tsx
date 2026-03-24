@@ -1,9 +1,11 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
 import { GeoapifyLocationInput } from "@/components/geoapify-location-input";
 import {
+  deleteAccount,
   fetchCategories,
   fetchMonitoringReadiness,
   fetchSettings,
@@ -19,7 +21,8 @@ import {
 } from "@/lib/api";
 
 export default function SettingsPage() {
-  const { token } = useAuth();
+  const router = useRouter();
+  const { token, logout } = useAuth();
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [categoryOptions, setCategoryOptions] = useState<{ id: string; label: string }[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
@@ -33,6 +36,10 @@ export default function SettingsPage() {
   const [readiness, setReadiness] = useState<MonitoringReadiness | null>(null);
   const [worker, setWorker] = useState<WorkerStatusPayload | null>(null);
   const [runErr, setRunErr] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteErr, setDeleteErr] = useState<string | null>(null);
 
   const loadAll = useCallback(async () => {
     if (!token) return;
@@ -81,6 +88,7 @@ export default function SettingsPage() {
     e.preventDefault();
     if (!token || !settings) return;
     setMsg(null);
+    setSaving(true);
     try {
       const { radius_km, ...rest } = settings;
       void radius_km;
@@ -89,8 +97,10 @@ export default function SettingsPage() {
       const rd = await fetchMonitoringReadiness(token);
       setReadiness(rd);
       setMsg("Saved.");
-    } catch {
-      setMsg("Save failed.");
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : "Save failed.");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -103,6 +113,18 @@ export default function SettingsPage() {
   const busyStates = new Set(["starting", "searching", "monitoring"]);
   const workerBusy = settings.monitoring_enabled && busyStates.has(worker?.monitoring_state ?? "");
   const canRun = (readiness?.ready ?? false) && !settings.monitoring_enabled;
+  const canSave = Boolean(token && settings && !saving);
+  const saveDisabledReason = !token
+    ? "Sign in to save settings."
+    : !settings
+      ? "Loading settings…"
+      : saving
+        ? "Saving…"
+        : null;
+  let runDisabledReason: string | null = null;
+  if (!readiness) runDisabledReason = "Loading readiness…";
+  else if (settings.monitoring_enabled) runDisabledReason = "Stop monitoring before starting again.";
+  else if (!readiness.ready) runDisabledReason = "Run is blocked until every item below passes (save settings after edits).";
 
   return (
     <div>
@@ -223,6 +245,28 @@ export default function SettingsPage() {
               onChange={(e) => setSettings({ ...settings, max_price: Number(e.target.value) })}
             />
             <p className="mt-1 text-[11px] text-zinc-500">Prices are shown and stored in US dollars.</p>
+          </div>
+
+          <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-3">
+            <p className="text-xs text-zinc-400">
+              Save stores location, radius, category, price, and Telegram fields. This does not depend on monitoring
+              readiness or Telegram — you can save partial progress anytime.
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                type="submit"
+                disabled={!canSave}
+                title={!canSave ? saveDisabledReason ?? undefined : undefined}
+                aria-label="Save settings"
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {saving ? "Saving…" : "Save settings"}
+              </button>
+              {!canSave && saveDisabledReason ? (
+                <span className="text-xs text-amber-200/90">{saveDisabledReason}</span>
+              ) : null}
+            </div>
+            {msg && <p className="mt-2 text-sm text-emerald-400">{msg}</p>}
           </div>
 
           <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-4">
@@ -398,9 +442,12 @@ export default function SettingsPage() {
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40"
+              className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40 ${
+                canRun ? "bg-emerald-700" : "border border-zinc-600 bg-zinc-800"
+              }`}
               disabled={!canRun}
-              title={!canRun ? "Fix checklist items or stop monitoring first" : "Start persistent monitoring"}
+              title={!canRun ? (runDisabledReason ?? "Run disabled") : "Start persistent monitoring"}
+              aria-label="Run monitoring (requires readiness)"
               onClick={async () => {
                 if (!token) return;
                 setRunErr(null);
@@ -445,12 +492,72 @@ export default function SettingsPage() {
               {runErr}
             </p>
           ) : null}
-
-          <button type="submit" className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium">
-            Save settings
-          </button>
-          {msg && <p className="text-sm text-emerald-400">{msg}</p>}
+          {!canRun && runDisabledReason ? (
+            <p className="text-xs text-zinc-500">{runDisabledReason}</p>
+          ) : null}
         </form>
+
+        <div className="mt-10 max-w-lg rounded-xl border border-red-900/40 bg-red-950/20 px-4 py-4">
+          <h2 className="text-sm font-medium text-red-200/95">Danger zone</h2>
+          <p className="mt-1 text-xs text-zinc-500">
+            Permanently delete your account and your listings. This cannot be undone.
+          </p>
+          {!deleteOpen ? (
+            <button
+              type="button"
+              className="mt-3 rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-200"
+              onClick={() => {
+                setDeleteOpen(true);
+                setDeleteErr(null);
+                setDeletePassword("");
+              }}
+            >
+              Delete account…
+            </button>
+          ) : (
+            <div className="mt-3 space-y-2">
+              <label className="block text-xs text-zinc-500">Confirm with your password</label>
+              <input
+                type="password"
+                autoComplete="current-password"
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+                value={deletePassword}
+                onChange={(e) => setDeletePassword(e.target.value)}
+              />
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="rounded-lg bg-red-800 px-3 py-2 text-sm"
+                  onClick={async () => {
+                    if (!token) return;
+                    setDeleteErr(null);
+                    try {
+                      await deleteAccount(token, deletePassword);
+                      logout();
+                      router.replace("/login");
+                    } catch (e) {
+                      setDeleteErr(e instanceof Error ? e.message : "Delete failed.");
+                    }
+                  }}
+                >
+                  Delete my account
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg bg-zinc-800 px-3 py-2 text-sm"
+                  onClick={() => {
+                    setDeleteOpen(false);
+                    setDeletePassword("");
+                    setDeleteErr(null);
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+              {deleteErr ? <p className="text-sm text-red-400">{deleteErr}</p> : null}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

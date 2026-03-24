@@ -107,8 +107,29 @@ export async function updateSettings(
     headers: headers(token),
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error("Failed to save settings");
+  if (!res.ok) {
+    const err = (await res.json().catch(() => null)) as { detail?: unknown } | null;
+    const msg =
+      typeof err?.detail === "string"
+        ? err.detail
+        : Array.isArray(err?.detail)
+          ? err.detail.map((e: { msg?: string }) => e.msg ?? "").filter(Boolean).join(" ")
+          : "Failed to save settings";
+    throw new Error(msg);
+  }
   return res.json() as Promise<UserSettings>;
+}
+
+export async function deleteAccount(token: string, password: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/auth/delete-account`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify({ password }),
+  });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(typeof err?.detail === "string" ? err.detail : "Could not delete account");
+  }
 }
 
 export async function sendTelegramTest(token: string): Promise<{ ok: boolean; message: string }> {
@@ -243,6 +264,20 @@ export async function adminCreateUser(
     headers: headers(token),
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error("Create failed");
+  if (!res.ok) {
+    const err = (await res.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(typeof err?.detail === "string" ? err.detail : "Create failed");
+  }
   return res.json() as Promise<AdminUser>;
+}
+
+export async function adminDeleteUser(token: string, userId: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/admin/users/${userId}`, {
+    method: "DELETE",
+    headers: headers(token),
+  });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(typeof err?.detail === "string" ? err.detail : "Delete failed");
+  }
 }
