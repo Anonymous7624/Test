@@ -19,6 +19,7 @@ import {
   type UserSettings,
   type WorkerStatusPayload,
 } from "@/lib/api";
+import { copyTextSafe } from "@/lib/clipboard";
 
 const MONITORING_BUSY_STATES = new Set(["starting", "backfill", "polling"]);
 
@@ -56,6 +57,7 @@ export default function SettingsPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deletePassword, setDeletePassword] = useState("");
   const [deleteErr, setDeleteErr] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const lastSavedSnapshotRef = useRef<string>("");
   const isHydratedRef = useRef(false);
@@ -63,20 +65,31 @@ export default function SettingsPage() {
 
   const loadAll = useCallback(async () => {
     if (!token) return;
-    const [{ categories }, s, st, rd] = await Promise.all([
-      fetchCategories(),
-      fetchSettings(token),
-      workerStatus(token),
-      fetchMonitoringReadiness(token),
-    ]);
-    setCategoryOptions(categories.map((c) => ({ id: c.id, label: c.label })));
-    setSettings(s);
-    lastSavedSnapshotRef.current = editableSnapshot(s);
-    isHydratedRef.current = true;
-    editableDirtyRef.current = false;
-    setSaveUi("saved");
-    setWorker(st);
-    setReadiness(rd);
+    setLoadError(null);
+    try {
+      const [{ categories }, s, st, rd] = await Promise.all([
+        fetchCategories().catch(() => ({ categories: [] as { id: string; label: string }[] })),
+        fetchSettings(token),
+        workerStatus(token),
+        fetchMonitoringReadiness(token).catch(
+          (): MonitoringReadiness => ({
+            ready: false,
+            errors: ["Could not load readiness"],
+            checks: [],
+          }),
+        ),
+      ]);
+      setCategoryOptions(categories.map((c) => ({ id: c.id, label: c.label })));
+      setSettings(s);
+      lastSavedSnapshotRef.current = editableSnapshot(s);
+      isHydratedRef.current = true;
+      editableDirtyRef.current = false;
+      setSaveUi("saved");
+      setWorker(st);
+      setReadiness(rd);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "Failed to load settings");
+    }
   }, [token]);
 
   useEffect(() => {
@@ -89,8 +102,7 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (!token || !settings || !isHydratedRef.current) return;
-    const st = (settings.monitoring_state ?? "").toLowerCase();
-    if (settings.monitoring_enabled && MONITORING_BUSY_STATES.has(st)) return;
+    if (settings.monitoring_enabled) return;
     const snap = editableSnapshot(settings);
     if (snap === lastSavedSnapshotRef.current) return;
     editableDirtyRef.current = true;
@@ -128,18 +140,23 @@ export default function SettingsPage() {
     if (!token) return;
     const id = window.setInterval(() => {
       void (async () => {
+        const st = await workerStatus(token);
+        setWorker(st);
         try {
-          const [st, rd] = await Promise.all([workerStatus(token), fetchMonitoringReadiness(token)]);
-          setWorker(st);
+          const rd = await fetchMonitoringReadiness(token);
           setReadiness(rd);
-          if (!editableDirtyRef.current) {
+        } catch {
+          /* transient readiness failure */
+        }
+        if (!editableDirtyRef.current) {
+          try {
             const s = await fetchSettings(token);
             setSettings(s);
             lastSavedSnapshotRef.current = editableSnapshot(s);
             setSaveUi("saved");
+          } catch {
+            /* keep UI stable if settings poll fails */
           }
-        } catch {
-          /* ignore */
         }
       })();
     }, 4000);
@@ -153,12 +170,28 @@ export default function SettingsPage() {
   const readinessRows = readiness?.checks ?? [];
 
   if (!settings) {
+    if (loadError) {
+      return (
+        <div>
+          <h1 className="text-2xl font-semibold">Settings</h1>
+          <p className="mt-4 rounded-lg border border-red-900/50 bg-red-950/30 px-3 py-2 text-sm text-red-200">
+            {loadError}
+          </p>
+        </div>
+      );
+    }
     return <p className="text-zinc-500">Loading…</p>;
   }
 
-  const ms = (settings.monitoring_state ?? "").toLowerCase();
-  const settingsLocked = settings.monitoring_enabled && MONITORING_BUSY_STATES.has(ms);
-  const workerBusy = settingsLocked;
+  const msSettings = (settings.monitoring_state ?? "").toLowerCase();
+  const msLive = (() => {
+    const w = worker?.monitoring_state ?? "";
+    const wl = w.toLowerCase();
+    if (worker?.status_fetch_error || wl === "" || wl === "unknown") return msSettings;
+    return wl;
+  })();
+  const settingsLocked = settings.monitoring_enabled;
+  const workerBusy = settings.monitoring_enabled && MONITORING_BUSY_STATES.has(msLive);
   const canRun = (readiness?.ready ?? false) && !settings.monitoring_enabled;
 
   let runDisabledReason: string | null = null;
@@ -227,7 +260,7 @@ export default function SettingsPage() {
                     : "bg-zinc-800 text-zinc-400"
                 }`}
               >
-                {settings.monitoring_enabled ? (worker?.monitoring_state ?? "…").toUpperCase() : "IDLE"}
+                {settings.monitoring_enabled ? (msLive || "…").toUpperCase() : "IDLE"}
               </span>
             </div>
           </div>
@@ -265,41 +298,108 @@ export default function SettingsPage() {
             </p>
           ) : null}
           {worker?.pipeline_counts ? (
-            <dl className="mt-2 grid gap-1 font-mono text-[11px] text-zinc-500 sm:grid-cols-2">
-              <div>
-                <dt className="inline text-zinc-600">Collected </dt>
-                <dd className="inline text-zinc-400">{worker.pipeline_counts.raw_collected}</dd>
-              </div>
-              <div>
-                <dt className="inline text-zinc-600">Matched </dt>
-                <dd className="inline text-zinc-400">{worker.pipeline_counts.step2_matched}</dd>
-              </div>
-              <div>
-                <dt className="inline text-zinc-600">Scored </dt>
-                <dd className="inline text-zinc-400">{worker.pipeline_counts.step3_scored}</dd>
-              </div>
-              <div>
-                <dt className="inline text-zinc-600">Saved / alerts </dt>
-                <dd className="inline text-zinc-400">
-                  {worker.pipeline_counts.step4_saved} / {worker.pipeline_counts.alerts_sent}
-                </dd>
-              </div>
-            </dl>
+            <div className="mt-2">
+              <p className="text-[10px] uppercase tracking-wide text-zinc-600">
+                Last completed batch (Steps 1–4) — not lifetime totals
+              </p>
+              <dl className="mt-1 grid gap-1 font-mono text-[11px] text-zinc-500 sm:grid-cols-2">
+                <div>
+                  <dt className="inline text-zinc-600">Raw collected </dt>
+                  <dd className="inline text-zinc-400">{worker.pipeline_counts.raw_collected}</dd>
+                </div>
+                <div>
+                  <dt className="inline text-zinc-600">After prefilter </dt>
+                  <dd className="inline text-zinc-400">{worker.pipeline_counts.step1_kept}</dd>
+                </div>
+                <div>
+                  <dt className="inline text-zinc-600">Matched </dt>
+                  <dd className="inline text-zinc-400">{worker.pipeline_counts.step2_matched}</dd>
+                </div>
+                <div>
+                  <dt className="inline text-zinc-600">Scored </dt>
+                  <dd className="inline text-zinc-400">{worker.pipeline_counts.step3_scored}</dd>
+                </div>
+                <div>
+                  <dt className="inline text-zinc-600">Saved / alerts </dt>
+                  <dd className="inline text-zinc-400">
+                    {worker.pipeline_counts.step4_saved} / {worker.pipeline_counts.alerts_sent}
+                  </dd>
+                </div>
+              </dl>
+            </div>
           ) : null}
           {worker?.last_error ? (
             <p className="mt-3 rounded-lg border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-200">
+              <span className="font-medium text-red-300/95">Last fatal worker error — </span>
               {worker.last_error}
             </p>
           ) : null}
           {worker?.pipeline_error ? (
-            <p className="mt-2 rounded-lg border border-red-900/40 bg-red-950/20 px-3 py-2 text-xs text-red-200/95">
-              Pipeline: {worker.pipeline_error}
+            <p className="mt-2 rounded-lg border border-amber-900/40 bg-amber-950/20 px-3 py-2 text-xs text-amber-100/95">
+              <span className="font-medium text-amber-200/95">In-pipeline notice — </span>
+              {worker.pipeline_error}
+              <span className="mt-1 block text-[10px] text-zinc-500">
+                Clears when the current batch finishes successfully or a new cycle starts.
+              </span>
             </p>
           ) : null}
           {user?.role === "admin" && worker?.admin_pipeline_snapshot ? (
             <details className="mt-3 rounded-lg border border-violet-900/40 bg-violet-950/20 px-3 py-2">
-              <summary className="cursor-pointer text-xs font-medium text-violet-200/95">Admin · raw pipeline snapshot</summary>
-              <pre className="mt-2 max-h-48 overflow-auto text-[10px] text-zinc-500">
+              <summary className="cursor-pointer text-xs font-medium text-violet-200/95">
+                Admin · pipeline debug (live DB fields)
+              </summary>
+              <dl className="mt-2 grid gap-1.5 text-[11px] text-zinc-400 sm:grid-cols-2">
+                <div>
+                  <dt className="text-zinc-600">Current stage</dt>
+                  <dd className="font-mono text-zinc-300">
+                    step {(worker.admin_pipeline_snapshot.worker_current_step as number) ?? "—"} ·{" "}
+                    {String(worker.admin_pipeline_snapshot.worker_current_state ?? "—")}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-zinc-600">Stored listings (DB)</dt>
+                  <dd className="font-mono text-zinc-300">
+                    {typeof worker.admin_pipeline_snapshot.stored_listings_count === "number"
+                      ? worker.admin_pipeline_snapshot.stored_listings_count
+                      : worker.listings_found_count}
+                  </dd>
+                </div>
+                <div className="sm:col-span-2">
+                  <dt className="text-zinc-600">Message</dt>
+                  <dd className="font-mono text-xs text-zinc-300">
+                    {(worker.admin_pipeline_snapshot.worker_pipeline_message as string) || "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-zinc-600">Last batch started</dt>
+                  <dd className="font-mono text-zinc-300">
+                    {worker.admin_pipeline_snapshot.worker_last_batch_started_at
+                      ? new Date(String(worker.admin_pipeline_snapshot.worker_last_batch_started_at)).toLocaleString()
+                      : "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-zinc-600">Last successful batch</dt>
+                  <dd className="font-mono text-zinc-300">
+                    {worker.admin_pipeline_snapshot.worker_last_success_at
+                      ? new Date(String(worker.admin_pipeline_snapshot.worker_last_success_at)).toLocaleString()
+                      : "—"}
+                  </dd>
+                </div>
+                <div className="sm:col-span-2">
+                  <dt className="text-zinc-600">Last fatal error (DB)</dt>
+                  <dd className="text-xs text-red-300/90">
+                    {(worker.admin_pipeline_snapshot.last_error as string | null) || "—"}
+                  </dd>
+                </div>
+                <div className="sm:col-span-2">
+                  <dt className="text-zinc-600">Pipeline error (DB)</dt>
+                  <dd className="text-xs text-amber-200/90">
+                    {(worker.admin_pipeline_snapshot.worker_pipeline_error as string | null) || "—"}
+                  </dd>
+                </div>
+              </dl>
+              <pre className="mt-2 max-h-40 overflow-auto text-[10px] text-zinc-500">
                 {JSON.stringify(worker.admin_pipeline_snapshot, null, 2)}
               </pre>
             </details>
@@ -442,8 +542,7 @@ export default function SettingsPage() {
                     disabled={settingsLocked}
                     className="shrink-0 rounded-lg bg-emerald-800 px-3 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
                     onClick={() => {
-                      void navigator.clipboard.writeText(verifyInfo.startCommand);
-                      setTelegramMsg("Command copied to clipboard.");
+                      void copyTextSafe(verifyInfo.startCommand).then(({ message }) => setTelegramMsg(message));
                     }}
                   >
                     Copy

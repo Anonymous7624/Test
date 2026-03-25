@@ -217,6 +217,10 @@ class WorkerStatus(BaseModel):
     last_successful_run_at: datetime | None = None
     pipeline_error: str | None = None
     pipeline_counts: PipelineCountsOut | None = None
+    pipeline_counts_scope: str = Field(
+        default="last_batch",
+        description="Pipeline count fields reflect the last completed batch (Steps 1–4), not lifetime totals.",
+    )
     admin_pipeline_snapshot: dict | None = None
     collector_warning: str | None = None
 

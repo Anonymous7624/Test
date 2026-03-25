@@ -349,6 +349,9 @@ def process_batch(
     profile.worker_current_step = 0
     profile.worker_current_state = "batch_complete"
     profile.worker_last_success_at = datetime.utcnow()
+    # Batch finished without aborting — clear any per-item step errors so the site does not
+    # show stale "AI scoring failed" / "Save listing failed" after a successful completion.
+    profile.worker_pipeline_error = None
     profile.worker_pipeline_message = (
         f"Batch complete: collected={stats.raw_collected} matched={stats.step2_matched} "
         f"scored={stats.step3_scored} saved={stats.step4_saved} alerts={stats.alerts_sent}"

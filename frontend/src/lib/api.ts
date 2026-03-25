@@ -239,6 +239,8 @@ export type WorkerStatusPayload = {
   collector_warning?: string | null;
   /** Set by client when status could not be loaded (never thrown). */
   status_fetch_error?: string;
+  /** worker_count_* numbers are from the last completed batch, not lifetime totals. */
+  pipeline_counts_scope?: string;
 };
 
 const WORKER_STATUS_FALLBACK: WorkerStatusPayload = {

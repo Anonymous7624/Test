@@ -14,12 +14,14 @@ export default function DashboardPage() {
 
   const load = useCallback(async () => {
     if (!token) return;
-    const [st, rows] = await Promise.all([
-      workerStatus(token),
-      fetchListings(token, {}).catch(() => [] as ListingRow[]),
-    ]);
-    setWorker(st);
-    setListings(rows);
+    try {
+      const st = await workerStatus(token);
+      setWorker(st);
+      const rows = await fetchListings(token, {}).catch(() => [] as ListingRow[]);
+      setListings(rows);
+    } catch {
+      setListings([]);
+    }
   }, [token]);
 
   useEffect(() => {
@@ -33,11 +35,12 @@ export default function DashboardPage() {
   }, [token, load]);
 
   const statusOk = !worker?.status_fetch_error;
+  const ms = (worker?.monitoring_state ?? "").toLowerCase();
   const workerBusy =
-    statusOk &&
-    Boolean(worker?.monitoring_enabled && MONITORING_BUSY_STATES.has(worker?.monitoring_state ?? ""));
+    statusOk && Boolean(worker?.monitoring_enabled && MONITORING_BUSY_STATES.has(ms));
   const isAdmin = user?.role === "admin";
   const pc = worker?.pipeline_counts;
+  const storedCount = worker?.listings_found_count ?? listings.length;
 
   return (
     <div>
@@ -86,12 +89,15 @@ export default function DashboardPage() {
             </p>
           ) : null}
           {pc ? (
-            <dl className="mt-2 grid gap-1 font-mono text-[11px] text-zinc-500">
-              <div>
-                Step counts — collected {pc.raw_collected}, matched {pc.step2_matched}, scored {pc.step3_scored},
-                saved {pc.step4_saved}, alerts {pc.alerts_sent}
-              </div>
-            </dl>
+            <div className="mt-2">
+              <p className="text-[10px] uppercase tracking-wide text-zinc-600">
+                Last completed batch (Steps 1–4)
+              </p>
+              <p className="mt-1 font-mono text-[11px] text-zinc-500">
+                Raw {pc.raw_collected} · prefilter kept {pc.step1_kept} · matched {pc.step2_matched} · scored{" "}
+                {pc.step3_scored} · saved {pc.step4_saved} · alerts {pc.alerts_sent}
+              </p>
+            </div>
           ) : null}
           {worker?.last_successful_run_at ? (
             <p className="mt-1 text-[11px] text-zinc-600">
@@ -99,10 +105,16 @@ export default function DashboardPage() {
             </p>
           ) : null}
           {worker?.last_error ? (
-            <p className="mt-2 text-xs text-red-300">{worker.last_error}</p>
+            <p className="mt-2 text-xs text-red-300">
+              <span className="font-medium text-red-200/95">Last fatal error — </span>
+              {worker.last_error}
+            </p>
           ) : null}
           {worker?.pipeline_error ? (
-            <p className="mt-2 text-xs text-red-300/95">Pipeline: {worker.pipeline_error}</p>
+            <p className="mt-2 text-xs text-amber-100/95">
+              <span className="font-medium text-amber-200/95">In-pipeline notice — </span>
+              {worker.pipeline_error}
+            </p>
           ) : null}
           {worker?.collector_warning ? (
             <p className="mt-2 rounded-md border border-amber-800/60 bg-amber-950/30 px-2 py-1.5 text-xs text-amber-100/95">
@@ -113,8 +125,8 @@ export default function DashboardPage() {
 
         <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
           <h2 className="text-sm font-medium text-zinc-200">Listings</h2>
-          <p className="mt-2 text-3xl font-semibold text-zinc-100">{listings.length}</p>
-          <p className="mt-1 text-xs text-zinc-500">Stored matches for your account</p>
+          <p className="mt-2 text-3xl font-semibold text-zinc-100">{storedCount}</p>
+          <p className="mt-1 text-xs text-zinc-500">Total stored in the database for your account</p>
           <Link href="/listings" className="mt-3 inline-block text-sm text-emerald-400 hover:underline">
             Open listings →
           </Link>
@@ -129,14 +141,55 @@ export default function DashboardPage() {
 
       {isAdmin && worker && !worker.status_fetch_error ? (
         <div className="mt-6 rounded-xl border border-violet-900/50 bg-violet-950/20 p-4">
-          <h2 className="text-sm font-medium text-violet-200/95">Admin · worker pipeline snapshot</h2>
+          <h2 className="text-sm font-medium text-violet-200/95">Admin · worker pipeline</h2>
           <p className="mt-1 text-xs text-zinc-500">
-            Raw fields from the database (per-user isolation). Use for testing the worker loop.
+            Live DB snapshot for this user. Cycle counts are from the last completed batch; listing total is all rows
+            stored for the account.
           </p>
           {worker.admin_pipeline_snapshot ? (
-            <pre className="mt-3 max-h-64 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950/80 p-3 text-[11px] leading-relaxed text-zinc-400">
-              {JSON.stringify(worker.admin_pipeline_snapshot, null, 2)}
-            </pre>
+            <>
+              <dl className="mt-3 grid gap-2 text-[11px] text-zinc-400 sm:grid-cols-2">
+                <div>
+                  <dt className="text-zinc-600">Stage</dt>
+                  <dd className="font-mono text-zinc-300">
+                    step {(worker.admin_pipeline_snapshot.worker_current_step as number) ?? "—"} ·{" "}
+                    {String(worker.admin_pipeline_snapshot.worker_current_state ?? "—")}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-zinc-600">Stored listings (DB)</dt>
+                  <dd className="font-mono text-zinc-300">
+                    {typeof worker.admin_pipeline_snapshot.stored_listings_count === "number"
+                      ? worker.admin_pipeline_snapshot.stored_listings_count
+                      : worker.listings_found_count}
+                  </dd>
+                </div>
+                <div className="sm:col-span-2">
+                  <dt className="text-zinc-600">Current message</dt>
+                  <dd className="text-xs text-zinc-300">
+                    {(worker.admin_pipeline_snapshot.worker_pipeline_message as string) || "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-zinc-600">Last fatal error</dt>
+                  <dd className="text-xs text-red-300/90">
+                    {(worker.admin_pipeline_snapshot.last_error as string | null) || "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-zinc-600">Collector / pipeline warning</dt>
+                  <dd className="text-xs text-amber-200/90">
+                    {(worker.admin_pipeline_snapshot.worker_collector_warning as string | null) || "—"}
+                  </dd>
+                </div>
+              </dl>
+              <details className="mt-3">
+                <summary className="cursor-pointer text-[11px] text-violet-300/90">Raw JSON</summary>
+                <pre className="mt-2 max-h-48 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950/80 p-3 text-[10px] leading-relaxed text-zinc-500">
+                  {JSON.stringify(worker.admin_pipeline_snapshot, null, 2)}
+                </pre>
+              </details>
+            </>
           ) : (
             <p className="mt-2 text-xs text-zinc-500">No admin snapshot (unexpected).</p>
           )}

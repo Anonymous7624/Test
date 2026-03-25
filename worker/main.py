@@ -89,6 +89,16 @@ async def _collect_raws(
         raise
 
 
+def _reset_pipeline_cycle_counts(s: UserSettingsRow) -> None:
+    """Zero per-cycle counters (e.g. empty fetch after a batch that had matches)."""
+    s.worker_count_raw_collected = 0
+    s.worker_count_step1_kept = 0
+    s.worker_count_step2_matched = 0
+    s.worker_count_step3_scored = 0
+    s.worker_count_step4_saved = 0
+    s.worker_count_alerts_sent = 0
+
+
 def _begin_listing_collection(repo: UserRepository, s: UserSettingsRow, now: datetime) -> None:
     """Persist pipeline state before Playwright/mock fetch (step 1)."""
     s.worker_last_batch_started_at = now
@@ -97,6 +107,8 @@ def _begin_listing_collection(repo: UserRepository, s: UserSettingsRow, now: dat
     s.worker_pipeline_message = "Step 1: Looking for listings"
     s.worker_pipeline_error = None
     s.worker_collector_warning = None
+    # New attempt — do not show the previous tick's fatal error while this cycle runs.
+    s.last_error = None
     repo.replace_settings(s)
 
 
@@ -136,6 +148,7 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
             s.worker_current_state = "collector_error"
             s.worker_pipeline_error = str(exc)[:500]
             s.worker_pipeline_message = "Step 1: Collector failed"
+            s.last_checked_at = now
             repo.replace_settings(s)
             raise
         _after_listing_collection(repo, s, raws, collector_meta=collector_meta)
@@ -146,9 +159,12 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
                 flush=True,
             )
         else:
+            _reset_pipeline_cycle_counts(s)
             s.worker_current_step = 0
             s.worker_current_state = "no_listings_this_cycle"
             s.worker_pipeline_message = "Step 1: No listings returned this cycle"
+            s.worker_pipeline_error = None
+            s.worker_last_success_at = now
             repo.replace_settings(s)
         s.backfill_complete = True
         s.monitoring_state = "polling"
@@ -166,6 +182,7 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
         s.worker_current_state = "collector_error"
         s.worker_pipeline_error = str(exc)[:500]
         s.worker_pipeline_message = "Step 1: Collector failed"
+        s.last_checked_at = now
         repo.replace_settings(s)
         raise
     _after_listing_collection(repo, s, raws, collector_meta=collector_meta)
@@ -176,9 +193,12 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
             flush=True,
         )
     else:
+        _reset_pipeline_cycle_counts(s)
         s.worker_current_step = 0
         s.worker_current_state = "no_listings_this_cycle"
         s.worker_pipeline_message = "Step 1: No listings returned this cycle"
+        s.worker_pipeline_error = None
+        s.worker_last_success_at = now
         repo.replace_settings(s)
     s.last_checked_at = now
     s.last_error = None
@@ -195,6 +215,7 @@ async def tick() -> None:
             except Exception as exc:  # noqa: BLE001 — surface errors in MVP worker
                 s.monitoring_state = "error"
                 s.last_error = str(exc)[:500]
+                s.last_checked_at = datetime.utcnow()
                 UserRepository(db).replace_settings(s)
                 print(f"Worker user {s.user_id} error: {exc}", flush=True)
                 traceback.print_exc()
