@@ -11,8 +11,9 @@ function resolveApiBaseUrl(): string {
 
   if (process.env.NODE_ENV === "development") {
     console.warn(
-      "[api] Set NEXT_PUBLIC_API_BASE_URL in frontend/.env.local (e.g. http://192.168.1.181:8000)",
+      "[api] Set NEXT_PUBLIC_API_BASE_URL in frontend/.env.local for non-localhost backends (defaulting to http://127.0.0.1:8000)",
     );
+    return "http://127.0.0.1:8000/api";
   }
   return "";
 }
@@ -208,6 +209,15 @@ export async function workerStop(token: string) {
   return res.json();
 }
 
+export type PipelineCountsPayload = {
+  raw_collected: number;
+  step1_kept: number;
+  step2_matched: number;
+  step3_scored: number;
+  step4_saved: number;
+  alerts_sent: number;
+};
+
 export type WorkerStatusPayload = {
   monitoring_enabled: boolean;
   monitoring_state: string;
@@ -217,12 +227,60 @@ export type WorkerStatusPayload = {
   alerts_sent_count: number;
   backfill_complete: boolean;
   last_error: string | null;
+  current_step?: number;
+  current_state?: string;
+  pipeline_message?: string;
+  last_batch_started_at?: string | null;
+  last_successful_run_at?: string | null;
+  pipeline_error?: string | null;
+  pipeline_counts?: PipelineCountsPayload | null;
+  admin_pipeline_snapshot?: Record<string, unknown> | null;
+  /** Set by client when status could not be loaded (never thrown). */
+  status_fetch_error?: string;
 };
 
-export async function workerStatus(token: string) {
-  const res = await fetch(`${API_BASE}/worker/status`, { headers: headers(token) });
-  if (!res.ok) throw new Error("Failed status");
-  return res.json() as Promise<WorkerStatusPayload>;
+const WORKER_STATUS_FALLBACK: WorkerStatusPayload = {
+  monitoring_enabled: false,
+  monitoring_state: "unknown",
+  message: "Status unavailable",
+  last_checked_at: null,
+  listings_found_count: 0,
+  alerts_sent_count: 0,
+  backfill_complete: true,
+  last_error: null,
+};
+
+/**
+ * Fetches worker/monitoring pipeline status. Never throws: returns a safe payload with
+ * `status_fetch_error` when the network fails or the API base is missing.
+ */
+export async function workerStatus(token: string): Promise<WorkerStatusPayload> {
+  if (!API_BASE) {
+    return {
+      ...WORKER_STATUS_FALLBACK,
+      status_fetch_error:
+        "API base URL is not configured. Set NEXT_PUBLIC_API_BASE_URL (e.g. http://127.0.0.1:8000) in frontend/.env.local.",
+    };
+  }
+  try {
+    const res = await fetch(`${API_BASE}/worker/status`, { headers: headers(token) });
+    if (!res.ok) {
+      return {
+        ...WORKER_STATUS_FALLBACK,
+        status_fetch_error: `Worker status request failed (HTTP ${res.status}).`,
+      };
+    }
+    return (await res.json()) as WorkerStatusPayload;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Network error";
+    return {
+      ...WORKER_STATUS_FALLBACK,
+      status_fetch_error:
+        msg === "Failed to fetch"
+          ? "Cannot reach the API (check that the backend is running and CORS allows this origin)."
+          : msg,
+    };
+  }
 }
 
 export type ReadinessCheck = { id: string; label: string; ok: boolean };

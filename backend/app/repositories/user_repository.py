@@ -28,6 +28,18 @@ def _default_settings_doc(user_id: int) -> dict:
         "last_checked_at": None,
         "last_error": None,
         "backfill_complete": True,
+        "worker_current_step": 0,
+        "worker_current_state": "idle",
+        "worker_pipeline_message": "",
+        "worker_last_batch_started_at": None,
+        "worker_last_success_at": None,
+        "worker_count_raw_collected": 0,
+        "worker_count_step1_kept": 0,
+        "worker_count_step2_matched": 0,
+        "worker_count_step3_scored": 0,
+        "worker_count_step4_saved": 0,
+        "worker_count_alerts_sent": 0,
+        "worker_pipeline_error": None,
     }
 
 
@@ -61,6 +73,18 @@ def settings_from_doc(doc: dict) -> UserSettingsState:
         last_checked_at=doc.get("last_checked_at"),
         last_error=doc.get("last_error"),
         backfill_complete=bool(doc.get("backfill_complete", True)),
+        worker_current_step=int(doc.get("worker_current_step", 0)),
+        worker_current_state=str(doc.get("worker_current_state") or "idle"),
+        worker_pipeline_message=str(doc.get("worker_pipeline_message") or ""),
+        worker_last_batch_started_at=doc.get("worker_last_batch_started_at"),
+        worker_last_success_at=doc.get("worker_last_success_at"),
+        worker_count_raw_collected=int(doc.get("worker_count_raw_collected", 0)),
+        worker_count_step1_kept=int(doc.get("worker_count_step1_kept", 0)),
+        worker_count_step2_matched=int(doc.get("worker_count_step2_matched", 0)),
+        worker_count_step3_scored=int(doc.get("worker_count_step3_scored", 0)),
+        worker_count_step4_saved=int(doc.get("worker_count_step4_saved", 0)),
+        worker_count_alerts_sent=int(doc.get("worker_count_alerts_sent", 0)),
+        worker_pipeline_error=doc.get("worker_pipeline_error"),
     )
 
 

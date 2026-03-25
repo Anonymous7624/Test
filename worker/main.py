@@ -62,6 +62,22 @@ def _collect_raws(profile: UserSettingsRow, *, backfill: bool) -> list[RawListin
         )
 
 
+def _begin_listing_collection(repo: UserRepository, s: UserSettingsRow, now: datetime) -> None:
+    """Persist pipeline state before Playwright/mock fetch (step 1)."""
+    s.worker_last_batch_started_at = now
+    s.worker_current_step = 1
+    s.worker_current_state = "collecting_listings"
+    s.worker_pipeline_message = "Step 1: Looking for listings"
+    s.worker_pipeline_error = None
+    repo.replace_settings(s)
+
+
+def _after_listing_collection(repo: UserRepository, s: UserSettingsRow, raws: list[RawListing]) -> None:
+    s.worker_count_raw_collected = len(raws)
+    s.worker_pipeline_message = f"Step 1: {len(raws)} listings found"
+    repo.replace_settings(s)
+
+
 def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
     repo = UserRepository(db)
     now = datetime.utcnow()
@@ -73,13 +89,20 @@ def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
     if not s.backfill_complete:
         s.monitoring_state = "backfill"
         repo.replace_settings(s)
+        _begin_listing_collection(repo, s, now)
         raws = _collect_raws(s, backfill=True)
+        _after_listing_collection(repo, s, raws)
         if raws:
             stats = process_batch(db, raws, profile=s, origin_type="backfill")
             print(
                 f"[user={s.user_id}] backfill batch: saved={stats.step4_saved} alerts_sent={stats.alerts_sent}",
                 flush=True,
             )
+        else:
+            s.worker_current_step = 0
+            s.worker_current_state = "no_listings_this_cycle"
+            s.worker_pipeline_message = "Step 1: No listings returned this cycle"
+            repo.replace_settings(s)
         s.backfill_complete = True
         s.monitoring_state = "polling"
         s.last_checked_at = now
@@ -89,13 +112,20 @@ def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
 
     s.monitoring_state = "polling"
     repo.replace_settings(s)
+    _begin_listing_collection(repo, s, now)
     raws = _collect_raws(s, backfill=False)
+    _after_listing_collection(repo, s, raws)
     if raws:
         stats = process_batch(db, raws, profile=s, origin_type="live")
         print(
             f"[user={s.user_id}] live batch: saved={stats.step4_saved} alerts_sent={stats.alerts_sent}",
             flush=True,
         )
+    else:
+        s.worker_current_step = 0
+        s.worker_current_state = "no_listings_this_cycle"
+        s.worker_pipeline_message = "Step 1: No listings returned this cycle"
+        repo.replace_settings(s)
     s.last_checked_at = now
     s.last_error = None
     repo.replace_settings(s)

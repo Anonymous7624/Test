@@ -33,6 +33,19 @@ class UserSettings:
     last_checked_at: datetime | None
     last_error: str | None
     backfill_complete: bool
+    # Worker pipeline snapshot (updated by worker process; read by API for live status)
+    worker_current_step: int = 0
+    worker_current_state: str = "idle"
+    worker_pipeline_message: str = ""
+    worker_last_batch_started_at: datetime | None = None
+    worker_last_success_at: datetime | None = None
+    worker_count_raw_collected: int = 0
+    worker_count_step1_kept: int = 0
+    worker_count_step2_matched: int = 0
+    worker_count_step3_scored: int = 0
+    worker_count_step4_saved: int = 0
+    worker_count_alerts_sent: int = 0
+    worker_pipeline_error: str | None = None
 
 
 @dataclass

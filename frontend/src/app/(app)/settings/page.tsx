@@ -20,6 +20,8 @@ import {
   type WorkerStatusPayload,
 } from "@/lib/api";
 
+const MONITORING_BUSY_STATES = new Set(["starting", "backfill", "polling"]);
+
 function editableSnapshot(s: UserSettings): string {
   return JSON.stringify({
     location_text: s.location_text,
@@ -37,7 +39,7 @@ type SaveUiState = "unsaved" | "saving" | "saved" | "error";
 
 export default function SettingsPage() {
   const router = useRouter();
-  const { token, logout } = useAuth();
+  const { token, logout, user } = useAuth();
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [categoryOptions, setCategoryOptions] = useState<{ id: string; label: string }[]>([]);
   const [telegramMsg, setTelegramMsg] = useState<string | null>(null);
@@ -87,6 +89,8 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (!token || !settings || !isHydratedRef.current) return;
+    const st = (settings.monitoring_state ?? "").toLowerCase();
+    if (settings.monitoring_enabled && MONITORING_BUSY_STATES.has(st)) return;
     const snap = editableSnapshot(settings);
     if (snap === lastSavedSnapshotRef.current) return;
     editableDirtyRef.current = true;
@@ -152,8 +156,9 @@ export default function SettingsPage() {
     return <p className="text-zinc-500">Loading…</p>;
   }
 
-  const busyStates = new Set(["starting", "backfill", "polling"]);
-  const workerBusy = settings.monitoring_enabled && busyStates.has(worker?.monitoring_state ?? "");
+  const ms = (settings.monitoring_state ?? "").toLowerCase();
+  const settingsLocked = settings.monitoring_enabled && MONITORING_BUSY_STATES.has(ms);
+  const workerBusy = settingsLocked;
   const canRun = (readiness?.ready ?? false) && !settings.monitoring_enabled;
 
   let runDisabledReason: string | null = null;
@@ -192,6 +197,12 @@ export default function SettingsPage() {
       >
         <span className={`font-medium ${saveUiClass}`}>{saveUiLabel}</span>
       </div>
+
+      {settingsLocked ? (
+        <p className="mt-4 rounded-lg border border-amber-900/50 bg-amber-950/30 px-3 py-2 text-sm text-amber-100/95">
+          Monitoring is running. Stop it before changing settings.
+        </p>
+      ) : null}
 
       <div className="mt-6 max-w-2xl space-y-6">
         <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
@@ -242,14 +253,61 @@ export default function SettingsPage() {
               </dd>
             </div>
           </dl>
+          {worker?.status_fetch_error ? (
+            <p className="mt-3 rounded-lg border border-amber-900/50 bg-amber-950/25 px-3 py-2 text-xs text-amber-100/90">
+              Cannot fetch worker status: {worker.status_fetch_error}
+            </p>
+          ) : null}
+          {worker?.pipeline_message ? (
+            <p className="mt-2 text-xs text-zinc-400">
+              <span className="text-zinc-500">Pipeline: </span>
+              {worker.pipeline_message}
+            </p>
+          ) : null}
+          {worker?.pipeline_counts ? (
+            <dl className="mt-2 grid gap-1 font-mono text-[11px] text-zinc-500 sm:grid-cols-2">
+              <div>
+                <dt className="inline text-zinc-600">Collected </dt>
+                <dd className="inline text-zinc-400">{worker.pipeline_counts.raw_collected}</dd>
+              </div>
+              <div>
+                <dt className="inline text-zinc-600">Matched </dt>
+                <dd className="inline text-zinc-400">{worker.pipeline_counts.step2_matched}</dd>
+              </div>
+              <div>
+                <dt className="inline text-zinc-600">Scored </dt>
+                <dd className="inline text-zinc-400">{worker.pipeline_counts.step3_scored}</dd>
+              </div>
+              <div>
+                <dt className="inline text-zinc-600">Saved / alerts </dt>
+                <dd className="inline text-zinc-400">
+                  {worker.pipeline_counts.step4_saved} / {worker.pipeline_counts.alerts_sent}
+                </dd>
+              </div>
+            </dl>
+          ) : null}
           {worker?.last_error ? (
             <p className="mt-3 rounded-lg border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-200">
               {worker.last_error}
             </p>
           ) : null}
+          {worker?.pipeline_error ? (
+            <p className="mt-2 rounded-lg border border-red-900/40 bg-red-950/20 px-3 py-2 text-xs text-red-200/95">
+              Pipeline: {worker.pipeline_error}
+            </p>
+          ) : null}
+          {user?.role === "admin" && worker?.admin_pipeline_snapshot ? (
+            <details className="mt-3 rounded-lg border border-violet-900/40 bg-violet-950/20 px-3 py-2">
+              <summary className="cursor-pointer text-xs font-medium text-violet-200/95">Admin · raw pipeline snapshot</summary>
+              <pre className="mt-2 max-h-48 overflow-auto text-[10px] text-zinc-500">
+                {JSON.stringify(worker.admin_pipeline_snapshot, null, 2)}
+              </pre>
+            </details>
+          ) : null}
         </div>
 
         <form className="max-w-lg space-y-4" onSubmit={onFormSubmit}>
+          <div className={`space-y-4 ${settingsLocked ? "opacity-55" : ""}`} aria-disabled={settingsLocked}>
           <div>
             <label className="block text-xs text-zinc-500">Location</label>
             <GeoapifyLocationInput
@@ -257,6 +315,7 @@ export default function SettingsPage() {
               center_lat={settings.center_lat}
               center_lon={settings.center_lon}
               geoapify_place_id={settings.geoapify_place_id}
+              disabled={settingsLocked}
               onChange={(next) =>
                 setSettings({
                   ...settings,
@@ -266,7 +325,7 @@ export default function SettingsPage() {
                   geoapify_place_id: next.geoapify_place_id,
                 })
               }
-              inputClassName="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+              inputClassName="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm disabled:cursor-not-allowed"
             />
             <p className="mt-1 text-[11px] text-zinc-500">Select a suggestion so the place is validated (not free text only).</p>
           </div>
@@ -276,7 +335,8 @@ export default function SettingsPage() {
               type="number"
               min={5}
               step={0.1}
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+              disabled={settingsLocked}
+              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm disabled:cursor-not-allowed"
               value={settings.radius_miles}
               onChange={(e) =>
                 setSettings({ ...settings, radius_miles: Number(e.target.value) })
@@ -286,7 +346,8 @@ export default function SettingsPage() {
           <div>
             <label className="block text-xs text-zinc-500">Category</label>
             <select
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+              disabled={settingsLocked}
+              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm disabled:cursor-not-allowed"
               value={settings.category_id}
               onChange={(e) => setSettings({ ...settings, category_id: e.target.value })}
             >
@@ -303,7 +364,8 @@ export default function SettingsPage() {
               type="number"
               min={10}
               step={1}
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+              disabled={settingsLocked}
+              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm disabled:cursor-not-allowed"
               value={settings.max_price}
               onChange={(e) =>
                 setSettings({ ...settings, max_price: Number(e.target.value) })
@@ -377,7 +439,8 @@ export default function SettingsPage() {
                   </code>
                   <button
                     type="button"
-                    className="shrink-0 rounded-lg bg-emerald-800 px-3 py-2 text-xs font-medium text-white"
+                    disabled={settingsLocked}
+                    className="shrink-0 rounded-lg bg-emerald-800 px-3 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
                     onClick={() => {
                       void navigator.clipboard.writeText(verifyInfo.startCommand);
                       setTelegramMsg("Command copied to clipboard.");
@@ -398,8 +461,9 @@ export default function SettingsPage() {
                 type="text"
                 inputMode="numeric"
                 autoComplete="off"
+                disabled={settingsLocked}
                 placeholder="Only if you cannot use verification — paste numeric chat id"
-                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono text-sm"
+                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono text-sm disabled:cursor-not-allowed"
                 value={settings.telegram_chat_id ?? ""}
                 onChange={(e) =>
                   setSettings({
@@ -415,7 +479,8 @@ export default function SettingsPage() {
             <div className="mt-3 flex flex-wrap gap-2">
               <button
                 type="button"
-                className="rounded-lg bg-emerald-700 px-4 py-2 text-sm"
+                disabled={settingsLocked}
+                className="rounded-lg bg-emerald-700 px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40"
                 onClick={async () => {
                   if (!token) return;
                   setTelegramMsg(null);
@@ -444,7 +509,7 @@ export default function SettingsPage() {
               </button>
               <button
                 type="button"
-                className="rounded-lg bg-zinc-800 px-4 py-2 text-sm"
+                className="rounded-lg bg-zinc-800 px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40"
                 onClick={async () => {
                   if (!token) return;
                   setTelegramMsg(null);
@@ -455,12 +520,13 @@ export default function SettingsPage() {
                     setTelegramMsg(e instanceof Error ? e.message : "Test failed.");
                   }
                 }}
-                disabled={!settings.telegram_connected}
+                disabled={settingsLocked || !settings.telegram_connected}
               >
                 Send test message
               </button>
             </div>
             {telegramMsg && <p className="mt-2 text-sm text-zinc-400">{telegramMsg}</p>}
+          </div>
           </div>
 
           <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-3">

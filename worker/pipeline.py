@@ -15,6 +15,7 @@ from datetime import datetime
 from app.domain import UserSettings as UserSettingsRow
 from app.models import AlertStatus
 from app.repositories.listing_repository import ListingRepository
+from app.repositories.user_repository import UserRepository
 from app.services.ai_scoring import MatchedCandidateInput, Step3ScoreResult, score_matched_candidate
 from app.services.profit_estimation import estimate_profit
 from app.services.telegram_service import send_profit_alert
@@ -27,6 +28,10 @@ from step2_matcher import strict_match
 from mock_scraper import RawListing
 
 logger = logging.getLogger(__name__)
+
+
+def _flush_pipeline(db: Database, profile: UserSettingsRow) -> None:
+    UserRepository(db).replace_settings(profile)
 
 
 @dataclass
@@ -91,6 +96,12 @@ def process_batch(
     """
     collection_inputs = build_collection_inputs(profile)
 
+    profile.worker_current_step = 1
+    profile.worker_current_state = "step1_normalize"
+    profile.worker_pipeline_message = "Step 1: Normalizing and prefiltering listings"
+    profile.worker_pipeline_error = None
+    _flush_pipeline(db, profile)
+
     raw_collected = len(raws)
     candidates: list[CandidateListing] = []
     step1_prefilter_drop = 0
@@ -112,6 +123,16 @@ def process_batch(
         candidates.append(cand)
 
     step1_kept = len(candidates)
+    profile.worker_count_raw_collected = raw_collected
+    profile.worker_count_step1_kept = step1_kept
+    profile.worker_current_step = 2
+    profile.worker_current_state = "step2_match"
+    profile.worker_pipeline_message = (
+        f"Step 2: Matching against user filters ({step1_kept} candidates after prefilter; "
+        f"{step1_prefilter_drop} dropped in step 1)"
+    )
+    _flush_pipeline(db, profile)
+
     repo = ListingRepository(db)
     step2_matched = 0
     step2_rejected = 0
@@ -135,6 +156,14 @@ def process_batch(
                 continue
 
             norm = normalized_from_candidate(c)
+            profile.worker_current_step = 3
+            profile.worker_current_state = "step3_ai_scoring"
+            profile.worker_count_step2_matched = step2_matched
+            profile.worker_pipeline_message = (
+                f"Step 3: Sending matched listings to AI ({step2_matched} matched so far; scoring {norm.title[:48]}…)"
+            )
+            _flush_pipeline(db, profile)
+
             print(
                 f"[user={profile.user_id}] step3: scoring title={norm.title[:80]!r} url={norm.source_url}",
                 flush=True,
@@ -154,6 +183,8 @@ def process_batch(
             try:
                 score = score_matched_candidate(step3_input)
             except Exception as exc:  # noqa: BLE001
+                profile.worker_pipeline_error = f"AI scoring failed: {str(exc)[:400]}"
+                _flush_pipeline(db, profile)
                 logger.exception("Step 3 unexpected error: %s", exc)
                 fb = estimate_profit(c.price, c.category_slug)
                 score = Step3ScoreResult(
@@ -176,6 +207,9 @@ def process_batch(
                 )
 
             step3_scored += 1
+            profile.worker_count_step3_scored = step3_scored
+            profile.worker_pipeline_message = f"Step 3: {step3_scored} scored (latest profit est. ${score.estimated_profit:.2f})"
+            _flush_pipeline(db, profile)
             status = "ok" if score.used_ollama else "fallback"
             print(
                 f"[user={profile.user_id}] step3: {status} profit={score.estimated_profit:.2f} "
@@ -186,6 +220,11 @@ def process_batch(
             profitable = score.estimated_profit > 0.0
             step4_fields = score.to_step4_fields()
             has_chat = bool((profile.telegram_chat_id or "").strip())
+
+            profile.worker_current_step = 4
+            profile.worker_current_state = "step4_save_alert"
+            profile.worker_pipeline_message = "Step 4: Saving results / sending alerts"
+            _flush_pipeline(db, profile)
 
             if not score.should_alert:
                 init_alert_status = AlertStatus.skipped.value
@@ -226,6 +265,8 @@ def process_batch(
                     alert_last_error=init_alert_err,
                 )
             except Exception as exc:  # noqa: BLE001
+                profile.worker_pipeline_error = f"Save listing failed: {str(exc)[:400]}"
+                _flush_pipeline(db, profile)
                 logger.exception("Step 4 save failed: %s", exc)
                 print(f"[user={profile.user_id}] step4: save failed: {exc}", flush=True)
                 continue
@@ -299,6 +340,21 @@ def process_batch(
         step4_saved=step4_saved,
         alerts_sent=alerts_sent,
     )
+    profile.worker_count_raw_collected = stats.raw_collected
+    profile.worker_count_step1_kept = stats.step1_kept
+    profile.worker_count_step2_matched = stats.step2_matched
+    profile.worker_count_step3_scored = stats.step3_scored
+    profile.worker_count_step4_saved = stats.step4_saved
+    profile.worker_count_alerts_sent = stats.alerts_sent
+    profile.worker_current_step = 0
+    profile.worker_current_state = "batch_complete"
+    profile.worker_last_success_at = datetime.utcnow()
+    profile.worker_pipeline_message = (
+        f"Batch complete: collected={stats.raw_collected} matched={stats.step2_matched} "
+        f"scored={stats.step3_scored} saved={stats.step4_saved} alerts={stats.alerts_sent}"
+    )
+    _flush_pipeline(db, profile)
+
     print(
         f"[user={profile.user_id}] pipeline summary: "
         f"raw={stats.raw_collected} step1_kept={stats.step1_kept} "

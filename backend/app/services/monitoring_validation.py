@@ -107,3 +107,14 @@ def validate_max_price_usd(price: float) -> None:
 def radius_km_from_miles(miles: float) -> float:
     validate_radius_miles(miles)
     return miles_to_km(miles)
+
+
+_ACTIVE_MONITORING_STATES = frozenset({"starting", "backfill", "polling"})
+
+
+def settings_update_locked(s: UserSettingsRow) -> bool:
+    """True while monitoring is enabled and the worker is in an active phase (not idle/error)."""
+    if not s.monitoring_enabled:
+        return False
+    st = (s.monitoring_state or "idle").strip().lower()
+    return st in _ACTIVE_MONITORING_STATES

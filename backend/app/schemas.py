@@ -192,6 +192,15 @@ class AdminUserOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class PipelineCountsOut(BaseModel):
+    raw_collected: int = 0
+    step1_kept: int = 0
+    step2_matched: int = 0
+    step3_scored: int = 0
+    step4_saved: int = 0
+    alerts_sent: int = 0
+
+
 class WorkerStatus(BaseModel):
     monitoring_enabled: bool
     monitoring_state: str
@@ -201,6 +210,14 @@ class WorkerStatus(BaseModel):
     alerts_sent_count: int = 0
     backfill_complete: bool = True
     last_error: str | None = None
+    current_step: int = 0
+    current_state: str = "idle"
+    pipeline_message: str = ""
+    last_batch_started_at: datetime | None = None
+    last_successful_run_at: datetime | None = None
+    pipeline_error: str | None = None
+    pipeline_counts: PipelineCountsOut | None = None
+    admin_pipeline_snapshot: dict | None = None
 
 
 class TelegramVerificationStart(BaseModel):

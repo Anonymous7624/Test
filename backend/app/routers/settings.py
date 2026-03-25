@@ -22,6 +22,7 @@ from app.services.location_service import LocationResolutionError, resolve_locat
 from app.services.monitoring_validation import (
     readiness_checks,
     readiness_errors,
+    settings_update_locked,
     validate_max_price_usd,
     validate_radius_miles,
 )
@@ -82,6 +83,11 @@ def update_my_settings(
 ) -> UserSettingsOut:
     repo = UserRepository(db)
     row = _get_settings_row(db, user)
+    if settings_update_locked(row):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Monitoring is running. Stop it before changing settings.",
+        )
     data = body.model_dump(exclude_unset=True)
     if "radius_miles" in data and data["radius_miles"] is not None:
         validate_radius_miles(float(data["radius_miles"]))
@@ -148,13 +154,18 @@ def start_telegram_verification(
     user: User = Depends(get_current_user),
     db: Database = Depends(get_db),
 ) -> TelegramVerificationStart:
+    row = _get_settings_row(db, user)
+    if settings_update_locked(row):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Monitoring is running. Stop it before changing settings.",
+        )
     if not (settings.telegram_bot_token or "").strip():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="TELEGRAM_BOT_TOKEN is not configured on the server.",
         )
     repo = UserRepository(db)
-    row = _get_settings_row(db, user)
     code = secrets.token_hex(4).upper()[:10]
     exp = datetime.utcnow() + timedelta(minutes=15)
     row.telegram_verify_code = code

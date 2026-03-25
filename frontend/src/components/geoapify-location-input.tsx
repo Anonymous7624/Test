@@ -24,6 +24,7 @@ type Props = {
   geoapify_place_id: string | null;
   onChange: (next: GeoapifySuggestion) => void;
   inputClassName?: string;
+  disabled?: boolean;
 };
 
 const DEBOUNCE_MS = 350;
@@ -35,6 +36,7 @@ export function GeoapifyLocationInput({
   geoapify_place_id,
   onChange,
   inputClassName,
+  disabled = false,
 }: Props) {
   const apiKey = process.env.NEXT_PUBLIC_GEOAPIFY_API_KEY?.trim() ?? "";
   const [query, setQuery] = useState(location_text);
@@ -82,6 +84,7 @@ export function GeoapifyLocationInput({
   );
 
   function onInputChange(v: string) {
+    if (disabled) return;
     setQuery(v);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
@@ -91,6 +94,7 @@ export function GeoapifyLocationInput({
   }
 
   function pick(hit: AutocompleteHit) {
+    if (disabled) return;
     if (hit.lat == null || hit.lon == null) return;
     const label = (hit.formatted || hit.address_line1 || "").trim() || query;
     const pid = hit.place_id ?? null;
@@ -119,8 +123,11 @@ export function GeoapifyLocationInput({
       <input
         className={inputClassName}
         value={query}
+        disabled={disabled}
+        aria-disabled={disabled}
         onChange={(e) => onInputChange(e.target.value)}
         onFocus={() => {
+          if (disabled) return;
           if (query.trim().length >= 2) {
             runAutocomplete(query);
             setOpen(true);
