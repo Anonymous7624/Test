@@ -238,6 +238,12 @@ export type WorkerStatusPayload = {
   last_successful_run_at?: string | null;
   pipeline_error?: string | null;
   pipeline_counts?: PipelineCountsPayload | null;
+  /** Live counters for the batch currently running (reset when a new batch starts). */
+  current_pipeline_counts?: PipelineCountsPayload | null;
+  current_pipeline_scope?: string;
+  /** Step 3 queue position while AI scoring (1-based); omitted when idle. */
+  pipeline_step3_rank?: number | null;
+  pipeline_step3_total?: number | null;
   admin_pipeline_snapshot?: Record<string, unknown> | null;
   /** Marketplace UI advanced filters skipped or partial; search may be broader than settings. */
   collector_warning?: string | null;
@@ -245,7 +251,7 @@ export type WorkerStatusPayload = {
   configuration_error?: string | null;
   /** Set by client when status could not be loaded (never thrown). */
   status_fetch_error?: string;
-  /** worker_count_* numbers are from the last completed batch, not lifetime totals. */
+  /** Snapshot when the previous batch finished; not the in-progress row. */
   pipeline_counts_scope?: string;
 };
 

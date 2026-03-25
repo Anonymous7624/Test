@@ -102,10 +102,21 @@ def _reset_pipeline_cycle_counts(s: UserSettingsRow) -> None:
     s.worker_count_alerts_sent = 0
 
 
+def _persist_empty_cycle_last_completed(s: UserSettingsRow) -> None:
+    """No listings returned — snapshot last completed batch as an empty cycle."""
+    s.worker_last_completed_raw_collected = 0
+    s.worker_last_completed_step1_kept = 0
+    s.worker_last_completed_step2_matched = 0
+    s.worker_last_completed_step3_scored = 0
+    s.worker_last_completed_step4_saved = 0
+    s.worker_last_completed_alerts_sent = 0
+
+
 def _begin_listing_collection(
     repo: UserRepository, s: UserSettingsRow, now: datetime, *, backfill: bool
 ) -> None:
     """Persist pipeline state before Playwright/mock fetch (step 1)."""
+    _reset_pipeline_cycle_counts(s)
     s.worker_last_batch_started_at = now
     s.worker_current_step = 1
     s.worker_current_state = "collecting_listings"
@@ -116,6 +127,8 @@ def _begin_listing_collection(
     s.worker_last_collector_failure_at = None
     s.worker_last_collector_failure_message = None
     s.worker_configuration_error = None
+    s.worker_pipeline_step3_rank = 0
+    s.worker_pipeline_step3_total = 0
     # New attempt — do not show the previous tick's fatal error while this cycle runs.
     s.last_error = None
     repo.replace_settings(s)
@@ -264,6 +277,7 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
             )
         else:
             _reset_pipeline_cycle_counts(s)
+            _persist_empty_cycle_last_completed(s)
             s.worker_current_step = 0
             s.worker_current_state = "no_listings_this_cycle"
             s.worker_pipeline_message = "Step 1: No listings returned this cycle"
@@ -326,6 +340,7 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
         )
     else:
         _reset_pipeline_cycle_counts(s)
+        _persist_empty_cycle_last_completed(s)
         s.worker_current_step = 0
         s.worker_current_state = "no_listings_this_cycle"
         s.worker_pipeline_message = "Step 1: No listings returned this cycle"

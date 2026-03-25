@@ -41,6 +41,28 @@ def _display_last_error(s: UserSettingsRow) -> str | None:
     return None
 
 
+def _pipeline_counts_last_completed(s: UserSettingsRow) -> PipelineCountsOut:
+    return PipelineCountsOut(
+        raw_collected=int(getattr(s, "worker_last_completed_raw_collected", 0)),
+        step1_kept=int(getattr(s, "worker_last_completed_step1_kept", 0)),
+        step2_matched=int(getattr(s, "worker_last_completed_step2_matched", 0)),
+        step3_scored=int(getattr(s, "worker_last_completed_step3_scored", 0)),
+        step4_saved=int(getattr(s, "worker_last_completed_step4_saved", 0)),
+        alerts_sent=int(getattr(s, "worker_last_completed_alerts_sent", 0)),
+    )
+
+
+def _pipeline_counts_current(s: UserSettingsRow) -> PipelineCountsOut:
+    return PipelineCountsOut(
+        raw_collected=int(getattr(s, "worker_count_raw_collected", 0)),
+        step1_kept=int(getattr(s, "worker_count_step1_kept", 0)),
+        step2_matched=int(getattr(s, "worker_count_step2_matched", 0)),
+        step3_scored=int(getattr(s, "worker_count_step3_scored", 0)),
+        step4_saved=int(getattr(s, "worker_count_step4_saved", 0)),
+        alerts_sent=int(getattr(s, "worker_count_alerts_sent", 0)),
+    )
+
+
 def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
     s = _user_settings(db, user)
     repo = ListingRepository(db)
@@ -50,14 +72,12 @@ def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
     if s.monitoring_enabled:
         state = (s.monitoring_state or "idle").strip() or "idle"
 
-    counts = PipelineCountsOut(
-        raw_collected=int(getattr(s, "worker_count_raw_collected", 0)),
-        step1_kept=int(getattr(s, "worker_count_step1_kept", 0)),
-        step2_matched=int(getattr(s, "worker_count_step2_matched", 0)),
-        step3_scored=int(getattr(s, "worker_count_step3_scored", 0)),
-        step4_saved=int(getattr(s, "worker_count_step4_saved", 0)),
-        alerts_sent=int(getattr(s, "worker_count_alerts_sent", 0)),
-    )
+    counts = _pipeline_counts_last_completed(s)
+    current_counts = _pipeline_counts_current(s)
+    rk = int(getattr(s, "worker_pipeline_step3_rank", 0) or 0)
+    tot = int(getattr(s, "worker_pipeline_step3_total", 0) or 0)
+    step3_rank_out: int | None = rk if rk > 0 and tot > 0 else None
+    step3_total_out: int | None = tot if rk > 0 and tot > 0 else None
 
     pipeline_msg = (getattr(s, "worker_pipeline_message", None) or "").strip()
     if not pipeline_msg:
@@ -97,6 +117,10 @@ def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
             "backfill_complete": bool(getattr(s, "backfill_complete", True)),
             "counts": counts.model_dump(),
             "counts_scope": "last_completed_batch_steps_1_to_4",
+            "current_counts": current_counts.model_dump(),
+            "current_counts_scope": "in_progress_batch_steps_1_to_4",
+            "pipeline_step3_rank": step3_rank_out,
+            "pipeline_step3_total": step3_total_out,
             "stored_listings_count": listings_n,
         }
 
@@ -116,7 +140,11 @@ def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
         last_successful_run_at=getattr(s, "worker_last_success_at", None),
         pipeline_error=getattr(s, "worker_pipeline_error", None),
         pipeline_counts=counts,
-        pipeline_counts_scope="last_batch",
+        pipeline_counts_scope="last_completed_batch",
+        current_pipeline_counts=current_counts,
+        current_pipeline_scope="in_progress_batch",
+        pipeline_step3_rank=step3_rank_out,
+        pipeline_step3_total=step3_total_out,
         admin_pipeline_snapshot=admin_snap,
         collector_warning=getattr(s, "worker_collector_warning", None),
         configuration_error=getattr(s, "worker_configuration_error", None),
@@ -128,6 +156,8 @@ def _soft_idle_on_stop(s: UserSettingsRow) -> None:
     s.worker_current_step = 0
     s.worker_current_state = "idle"
     s.worker_pipeline_message = ""
+    s.worker_pipeline_step3_rank = 0
+    s.worker_pipeline_step3_total = 0
     s.worker_collector_warning = None
     s.worker_pipeline_error = None
     s.worker_configuration_error = None

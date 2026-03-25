@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from collections import Counter
 from dataclasses import dataclass, fields
 from datetime import datetime
@@ -77,7 +78,40 @@ def _persisted_listing_location_text(
 
 
 def _flush_pipeline(db: Database, profile: UserSettingsRow) -> None:
+    """Persist pipeline fields; bumps last_checked_at so the API/UI show live worker activity."""
+    profile.last_checked_at = datetime.utcnow()
     UserRepository(db).replace_settings(profile)
+
+
+def _write_last_completed_snapshot(profile: UserSettingsRow, stats: PipelineBatchResult) -> None:
+    profile.worker_last_completed_raw_collected = stats.raw_collected
+    profile.worker_last_completed_step1_kept = stats.step1_kept
+    profile.worker_last_completed_step2_matched = stats.step2_matched
+    profile.worker_last_completed_step3_scored = stats.step3_scored
+    profile.worker_last_completed_step4_saved = stats.step4_saved
+    profile.worker_last_completed_alerts_sent = stats.alerts_sent
+
+
+def _heartbeat_during_blocking(
+    db: Database,
+    profile: UserSettingsRow,
+    *,
+    interval_sec: float,
+) -> tuple[threading.Event, threading.Thread]:
+    """Periodically persist last_checked_at while a blocking call (Ollama HTTP) runs."""
+    stop = threading.Event()
+
+    def _run() -> None:
+        while not stop.wait(interval_sec):
+            profile.last_checked_at = datetime.utcnow()
+            try:
+                UserRepository(db).replace_settings(profile)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Step 3 heartbeat DB write failed: %s", exc)
+
+    t = threading.Thread(target=_run, daemon=True, name="step3_ai_heartbeat")
+    t.start()
+    return stop, t
 
 
 @dataclass
@@ -254,6 +288,8 @@ def process_batch(
     strong_min_hprofit = _env_float("WORKER_OLLAMA_STRONG_MIN_HEURISTIC_PROFIT", 25.0)
     base_timeout = float(settings.ollama_timeout or 180.0)
     strong_bonus = float(getattr(settings, "ollama_timeout_strong_bonus", 30.0))
+    per_candidate_max = _env_float("WORKER_STEP3_AI_CANDIDATE_MAX_SECONDS", 300.0)
+    heartbeat_sec = _env_float("WORKER_STEP3_HEARTBEAT_SECONDS", 15.0)
 
     if len(ai_jobs) > ai_cap:
         logger.warning(
@@ -267,6 +303,8 @@ def process_batch(
     profile.worker_current_step = 3
     profile.worker_current_state = "step3_ai_scoring"
     profile.worker_count_step2_matched = step2_matched
+    profile.worker_pipeline_step3_total = len(ai_jobs)
+    profile.worker_pipeline_step3_rank = 0
     profile.worker_pipeline_message = (
         f"Step 3: AI queue {len(ai_jobs)} (sorted by heuristic profit; cap={ai_cap})"
     )
@@ -275,6 +313,7 @@ def process_batch(
     for idx, job in enumerate(ai_jobs):
         c = job.cand
         try:
+            profile.worker_pipeline_error = None
             norm = normalized_from_candidate(c)
             listing_loc = _persisted_listing_location_text(
                 c,
@@ -284,8 +323,12 @@ def process_batch(
             is_strong = job.pre_strength >= strong_min_strength or (
                 job.heuristic_profit >= strong_min_hprofit
             )
-            timeout = base_timeout + (strong_bonus if is_strong else 0.0)
+            timeout = min(
+                base_timeout + (strong_bonus if is_strong else 0.0),
+                per_candidate_max,
+            )
 
+            profile.worker_pipeline_step3_rank = idx + 1
             profile.worker_pipeline_message = (
                 f"Step 3: scoring rank {idx + 1}/{len(ai_jobs)} {norm.title[:48]}…"
             )
@@ -308,6 +351,13 @@ def process_batch(
                 condition_text=_condition_from_metadata(c.raw_metadata),
             )
 
+            hb_stop: threading.Event | None = None
+            hb_thread: threading.Thread | None = None
+            if use_ollama_slot and heartbeat_sec > 0:
+                hb_stop, hb_thread = _heartbeat_during_blocking(
+                    db, profile, interval_sec=heartbeat_sec
+                )
+
             if use_ollama_slot:
                 try:
                     score = score_matched_candidate(
@@ -315,7 +365,9 @@ def process_batch(
                         timeout_seconds=timeout,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    profile.worker_pipeline_error = f"AI scoring failed: {str(exc)[:400]}"
+                    profile.worker_pipeline_error = (
+                        f"AI scoring exception (continuing): {str(exc)[:400]}"
+                    )
                     _flush_pipeline(db, profile)
                     logger.exception("Step 3 unexpected error: %s", exc)
                     fb = estimate_profit(c.price, c.category_slug)
@@ -337,6 +389,11 @@ def process_batch(
                             "used_ollama": False,
                         },
                     )
+                finally:
+                    if hb_stop is not None:
+                        hb_stop.set()
+                    if hb_thread is not None:
+                        hb_thread.join(timeout=2.0)
             else:
                 fb = estimate_profit(c.price, c.category_slug)
                 score = Step3ScoreResult(
@@ -361,7 +418,7 @@ def process_batch(
             fallback_used = not score.used_ollama
             logger.info(
                 "Step 3 user_id=%s rank=%s/%s priority_pre_strength=%.3f heuristic_profit=%.2f "
-                "ollama_slot=%s timeout=%.1f strong=%s used_ollama=%s fallback=%s",
+                "ollama_slot=%s timeout=%.1f cap=%.1f strong=%s used_ollama=%s fallback=%s",
                 profile.user_id,
                 idx + 1,
                 len(ai_jobs),
@@ -369,6 +426,7 @@ def process_batch(
                 job.heuristic_profit,
                 use_ollama_slot,
                 timeout if use_ollama_slot else 0.0,
+                per_candidate_max,
                 is_strong,
                 score.used_ollama,
                 fallback_used,
@@ -536,12 +594,15 @@ def process_batch(
         step4_saved=step4_saved,
         alerts_sent=alerts_sent,
     )
+    _write_last_completed_snapshot(profile, stats)
     profile.worker_count_raw_collected = stats.raw_collected
     profile.worker_count_step1_kept = stats.step1_kept
     profile.worker_count_step2_matched = stats.step2_matched
     profile.worker_count_step3_scored = stats.step3_scored
     profile.worker_count_step4_saved = stats.step4_saved
     profile.worker_count_alerts_sent = stats.alerts_sent
+    profile.worker_pipeline_step3_rank = 0
+    profile.worker_pipeline_step3_total = 0
     profile.worker_current_step = 0
     profile.worker_current_state = "batch_complete"
     profile.worker_last_success_at = datetime.utcnow()

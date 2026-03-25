@@ -101,6 +101,18 @@ def migrate_settings_doc(doc: dict[str, Any]) -> dict[str, Any]:
 
     d["telegram_alert_mode"] = normalize_telegram_alert_mode(str(d.get("telegram_alert_mode")))
 
+    # One-time: last-completed batch snapshot (separate from in-progress worker_count_*)
+    if "worker_last_completed_raw_collected" not in d:
+        d["worker_last_completed_raw_collected"] = int(d.get("worker_count_raw_collected", 0))
+        d["worker_last_completed_step1_kept"] = int(d.get("worker_count_step1_kept", 0))
+        d["worker_last_completed_step2_matched"] = int(d.get("worker_count_step2_matched", 0))
+        d["worker_last_completed_step3_scored"] = int(d.get("worker_count_step3_scored", 0))
+        d["worker_last_completed_step4_saved"] = int(d.get("worker_count_step4_saved", 0))
+        d["worker_last_completed_alerts_sent"] = int(d.get("worker_count_alerts_sent", 0))
+    if "worker_pipeline_step3_rank" not in d:
+        d["worker_pipeline_step3_rank"] = 0
+        d["worker_pipeline_step3_total"] = 0
+
     return d
 
 

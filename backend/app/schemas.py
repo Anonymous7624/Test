@@ -238,8 +238,21 @@ class WorkerStatus(BaseModel):
     pipeline_error: str | None = None
     pipeline_counts: PipelineCountsOut | None = None
     pipeline_counts_scope: str = Field(
-        default="last_batch",
+        default="last_completed_batch",
         description="Pipeline count fields reflect the last completed batch (Steps 1–4), not lifetime totals.",
+    )
+    current_pipeline_counts: PipelineCountsOut | None = None
+    current_pipeline_scope: str = Field(
+        default="in_progress_batch",
+        description="Live counters for the current cycle (reset when a new batch starts).",
+    )
+    pipeline_step3_rank: int | None = Field(
+        default=None,
+        description="1-based position in the Step 3 queue while scoring; null when idle.",
+    )
+    pipeline_step3_total: int | None = Field(
+        default=None,
+        description="Step 3 queue length while scoring; null when idle.",
     )
     admin_pipeline_snapshot: dict | None = None
     collector_warning: str | None = None

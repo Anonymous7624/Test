@@ -42,6 +42,7 @@ export default function DashboardPage() {
     statusOk && Boolean(worker?.monitoring_enabled && MONITORING_BUSY_STATES.has(ms));
   const isAdmin = user?.role === "admin";
   const pc = worker?.pipeline_counts;
+  const cur = worker?.current_pipeline_counts;
   const storedCount = worker?.listings_found_count ?? listings.length;
 
   return (
@@ -90,6 +91,24 @@ export default function DashboardPage() {
               <span className="text-zinc-600">Live: </span>
               {worker.pipeline_message}
             </p>
+          ) : null}
+          {typeof worker?.pipeline_step3_rank === "number" &&
+          typeof worker?.pipeline_step3_total === "number" &&
+          worker.pipeline_step3_total > 0 ? (
+            <p className="mt-2 text-[11px] font-mono text-zinc-400">
+              Step 3 queue: {worker.pipeline_step3_rank}/{worker.pipeline_step3_total}
+            </p>
+          ) : null}
+          {cur ? (
+            <div className="mt-2">
+              <p className="text-[10px] uppercase tracking-wide text-zinc-600">
+                Current batch (in progress)
+              </p>
+              <p className="mt-1 font-mono text-[11px] text-zinc-500">
+                Raw {cur.raw_collected} · prefilter kept {cur.step1_kept} · matched {cur.step2_matched} · scored{" "}
+                {cur.step3_scored} · saved {cur.step4_saved} · alerts {cur.alerts_sent}
+              </p>
+            </div>
           ) : null}
           {pc ? (
             <div className="mt-2">
@@ -152,8 +171,8 @@ export default function DashboardPage() {
         <div className="mt-6 rounded-xl border border-violet-900/50 bg-violet-950/20 p-4">
           <h2 className="text-sm font-medium text-violet-200/95">Admin · worker pipeline</h2>
           <p className="mt-1 text-xs text-zinc-500">
-            Live DB snapshot for this user. Cycle counts are from the last completed batch; listing total is all rows
-            stored for the account.
+            Live DB snapshot. Last completed vs current batch counts are separate; listing total is all rows stored for
+            the account.
           </p>
           {worker.admin_pipeline_snapshot ? (
             <>

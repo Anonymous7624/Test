@@ -49,6 +49,16 @@ class UserSettings:
     worker_count_step3_scored: int = 0
     worker_count_step4_saved: int = 0
     worker_count_alerts_sent: int = 0
+    # Snapshot of the last finished batch (updated when Steps 1–4 complete for a cycle).
+    worker_last_completed_raw_collected: int = 0
+    worker_last_completed_step1_kept: int = 0
+    worker_last_completed_step2_matched: int = 0
+    worker_last_completed_step3_scored: int = 0
+    worker_last_completed_step4_saved: int = 0
+    worker_last_completed_alerts_sent: int = 0
+    # Step 3 queue progress (0 when not in Step 3).
+    worker_pipeline_step3_rank: int = 0
+    worker_pipeline_step3_total: int = 0
     worker_pipeline_error: str | None = None
     # Set when Step 1 completes but Marketplace advanced UI filters were skipped (e.g. Filters drawer).
     worker_collector_warning: str | None = None

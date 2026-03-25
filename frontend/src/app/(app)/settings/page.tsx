@@ -300,6 +300,44 @@ export default function SettingsPage() {
               {worker.pipeline_message}
             </p>
           ) : null}
+          {typeof worker?.pipeline_step3_rank === "number" &&
+          typeof worker?.pipeline_step3_total === "number" &&
+          worker.pipeline_step3_total > 0 ? (
+            <p className="mt-2 text-[11px] font-mono text-zinc-400">
+              Step 3 queue: {worker.pipeline_step3_rank}/{worker.pipeline_step3_total}
+            </p>
+          ) : null}
+          {worker?.current_pipeline_counts ? (
+            <div className="mt-2">
+              <p className="text-[10px] uppercase tracking-wide text-zinc-600">
+                Current batch (in progress)
+              </p>
+              <dl className="mt-1 grid gap-1 font-mono text-[11px] text-zinc-500 sm:grid-cols-2">
+                <div>
+                  <dt className="inline text-zinc-600">Raw collected </dt>
+                  <dd className="inline text-zinc-400">{worker.current_pipeline_counts.raw_collected}</dd>
+                </div>
+                <div>
+                  <dt className="inline text-zinc-600">After prefilter </dt>
+                  <dd className="inline text-zinc-400">{worker.current_pipeline_counts.step1_kept}</dd>
+                </div>
+                <div>
+                  <dt className="inline text-zinc-600">Matched </dt>
+                  <dd className="inline text-zinc-400">{worker.current_pipeline_counts.step2_matched}</dd>
+                </div>
+                <div>
+                  <dt className="inline text-zinc-600">Scored </dt>
+                  <dd className="inline text-zinc-400">{worker.current_pipeline_counts.step3_scored}</dd>
+                </div>
+                <div>
+                  <dt className="inline text-zinc-600">Saved / alerts </dt>
+                  <dd className="inline text-zinc-400">
+                    {worker.current_pipeline_counts.step4_saved} / {worker.current_pipeline_counts.alerts_sent}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+          ) : null}
           {worker?.pipeline_counts ? (
             <div className="mt-2">
               <p className="text-[10px] uppercase tracking-wide text-zinc-600">
