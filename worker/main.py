@@ -8,6 +8,7 @@ Run from repository root (see README) so imports resolve:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 import traceback
@@ -36,15 +37,23 @@ from mock_scraper import RawListing, mock_fetch_backfill, mock_fetch_batch  # no
 from pipeline import process_batch  # noqa: E402
 from search_context import build_collection_inputs  # noqa: E402
 
+logger = logging.getLogger(__name__)
 
-def _collect_raws(profile: UserSettingsRow, *, backfill: bool) -> list[RawListing]:
+
+def _mock_collector_enabled() -> bool:
+    return os.environ.get("WORKER_MOCK_COLLECTOR", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+async def _collect_raws(profile: UserSettingsRow, *, backfill: bool) -> list[RawListing]:
     inputs = build_collection_inputs(profile)
-    try:
-        return fetch_listings_playwright(collection_inputs=inputs, backfill=backfill)
-    except FacebookAuthStateMissingError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        print(f"Playwright collector failed, using mock data: {exc}", flush=True)
+    if _mock_collector_enabled():
+        logger.warning(
+            "Using MOCK collector (WORKER_MOCK_COLLECTOR is set); no Playwright / Facebook."
+        )
         if backfill:
             return mock_fetch_backfill(
                 category_slug=inputs.category_id,
@@ -60,6 +69,19 @@ def _collect_raws(profile: UserSettingsRow, *, backfill: bool) -> list[RawListin
             keywords=inputs.keywords,
             search_area_labels=inputs.search_area_labels,
         )
+
+    try:
+        return await fetch_listings_playwright(collection_inputs=inputs, backfill=backfill)
+    except FacebookAuthStateMissingError:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Playwright collector failed (user_id=%s backfill=%s): %s",
+            profile.user_id,
+            backfill,
+            exc,
+        )
+        raise
 
 
 def _begin_listing_collection(repo: UserRepository, s: UserSettingsRow, now: datetime) -> None:
@@ -78,7 +100,7 @@ def _after_listing_collection(repo: UserRepository, s: UserSettingsRow, raws: li
     repo.replace_settings(s)
 
 
-def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
+async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
     repo = UserRepository(db)
     now = datetime.utcnow()
 
@@ -90,7 +112,14 @@ def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
         s.monitoring_state = "backfill"
         repo.replace_settings(s)
         _begin_listing_collection(repo, s, now)
-        raws = _collect_raws(s, backfill=True)
+        try:
+            raws = await _collect_raws(s, backfill=True)
+        except Exception as exc:
+            s.worker_current_state = "collector_error"
+            s.worker_pipeline_error = str(exc)[:500]
+            s.worker_pipeline_message = "Step 1: Collector failed"
+            repo.replace_settings(s)
+            raise
         _after_listing_collection(repo, s, raws)
         if raws:
             stats = process_batch(db, raws, profile=s, origin_type="backfill")
@@ -113,7 +142,14 @@ def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
     s.monitoring_state = "polling"
     repo.replace_settings(s)
     _begin_listing_collection(repo, s, now)
-    raws = _collect_raws(s, backfill=False)
+    try:
+        raws = await _collect_raws(s, backfill=False)
+    except Exception as exc:
+        s.worker_current_state = "collector_error"
+        s.worker_pipeline_error = str(exc)[:500]
+        s.worker_pipeline_message = "Step 1: Collector failed"
+        repo.replace_settings(s)
+        raise
     _after_listing_collection(repo, s, raws)
     if raws:
         stats = process_batch(db, raws, profile=s, origin_type="live")
@@ -131,13 +167,13 @@ def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
     repo.replace_settings(s)
 
 
-def tick() -> None:
+async def tick() -> None:
     db: Database = get_database()
     try:
         for doc in db["user_settings"].find({"monitoring_enabled": True}):
             s = settings_from_doc(doc)
             try:
-                _process_monitoring_user(db, s)
+                await _process_monitoring_user(db, s)
             except Exception as exc:  # noqa: BLE001 — surface errors in MVP worker
                 s.monitoring_state = "error"
                 s.last_error = str(exc)[:500]
@@ -149,16 +185,22 @@ def tick() -> None:
 
 
 async def main_loop() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    logging.getLogger("collector.playwright_collector").setLevel(logging.INFO)
+
     ensure_indexes(get_database())
     interval = float(os.environ.get("WORKER_POLL_SECONDS", "300"))
     print(
         f"Worker started. MONGODB_URI={settings.mongodb_uri} db={settings.mongodb_database} "
-        f"poll={interval}s (default 300 = 5 min)",
+        f"poll={interval}s (default 300 = 5 min) mock_collector={_mock_collector_enabled()}",
         flush=True,
     )
     while True:
         try:
-            tick()
+            await tick()
         except Exception as exc:  # noqa: BLE001
             print(f"Worker tick error: {exc}", flush=True)
             traceback.print_exc()
