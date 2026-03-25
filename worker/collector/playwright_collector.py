@@ -278,7 +278,7 @@ async def fetch_listings_playwright(
             context = await browser.new_context(storage_state=str(auth_path))
             try:
                 page = await context.new_page()
-                await page.set_default_timeout(60_000)
+                page.set_default_timeout(60_000)
 
                 if use_stub:
                     logger.info("Search target: local stub file %s", stub_path)
