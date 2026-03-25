@@ -36,6 +36,7 @@ def normalize_raw_to_candidate(
         "collection": {
             "category_id": collection_inputs.category_id,
             "keywords": list(collection_inputs.keywords),
+            "search_plan": collection_inputs.search_plan.to_log_dict(),
             "primary_search_location": collection_inputs.primary_search_location,
             "search_area_labels": list(collection_inputs.search_area_labels),
             "radius_hint": collection_inputs.radius_hint,

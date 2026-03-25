@@ -12,6 +12,8 @@ from typing import Any
 from app.domain import UserSettings as UserSettingsRow
 from app.services.categories_service import keywords_for_category
 
+from search_plan import SearchPlan, build_search_plan
+
 
 @dataclass
 class CollectionInputs:
@@ -20,6 +22,7 @@ class CollectionInputs:
     user_id: int
     category_id: str
     keywords: list[str]
+    search_plan: SearchPlan
     location_text: str
     primary_search_location: str
     search_area_labels: list[str]
@@ -58,7 +61,7 @@ def _nearby_and_related_areas(profile: UserSettingsRow) -> list[str]:
 def build_collection_inputs(profile: UserSettingsRow) -> CollectionInputs:
     """Build targeted collection/search inputs for one monitoring profile."""
     cid = str(profile.category_id or "").strip() or "general"
-    kws = keywords_for_category(cid)
+    plan = build_search_plan(profile)
     primary = build_search_location_hint(profile)
     areas = _nearby_and_related_areas(profile)
     r_km = float(profile.radius_km)
@@ -66,7 +69,8 @@ def build_collection_inputs(profile: UserSettingsRow) -> CollectionInputs:
     return CollectionInputs(
         user_id=profile.user_id,
         category_id=cid,
-        keywords=kws,
+        keywords=list(plan.focused_queries),
+        search_plan=plan,
         location_text=(profile.location_text or "").strip(),
         primary_search_location=primary,
         search_area_labels=areas,

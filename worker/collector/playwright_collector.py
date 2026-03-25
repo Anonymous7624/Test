@@ -16,11 +16,12 @@ import logging
 import os
 import re
 from pathlib import Path
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import urlencode
 
 from mock_scraper import RawListing
 
 from search_context import CollectionInputs
+from search_plan import SearchPlan
 
 logger = logging.getLogger(__name__)
 
@@ -62,21 +63,39 @@ def _parse_float(val: str | None) -> float | None:
         return None
 
 
-def _build_marketplace_search_url(inputs: CollectionInputs) -> str:
-    """Search query from location + keywords/category (Facebook Marketplace search page)."""
-    loc = (inputs.primary_search_location or "").strip()
-    if inputs.keywords:
-        q = f"{loc} {' '.join(inputs.keywords[:6])}".strip()
+def build_marketplace_search_url(plan: SearchPlan, query: str) -> str:
+    """
+    Facebook Marketplace URL with filters on the query string and product terms only in ``query``.
+
+    Category is expressed via path when ``plan.marketplace_category_slug`` is set; otherwise
+    ``/marketplace/search/``. Location is not stuffed into ``query`` (session / saved UI
+    location applies). Radius is not passed as a URL param (not stable in this flow).
+    """
+    max_p = int(max(0, min(plan.max_price, 1_000_000)))
+    params: list[tuple[str, str]] = []
+    q = (query or "").strip()
+    if q:
+        params.append(("query", q))
+    params.append(("maxPrice", str(max_p)))
+    params.append(("sortBy", plan.sort_mode))
+    params.append(("exact", "false"))
+    base = "https://www.facebook.com"
+    if plan.marketplace_category_slug:
+        path = f"{base}/marketplace/category/{plan.marketplace_category_slug}/"
     else:
-        q = f"{loc} {inputs.category_id}".strip()
-    if not q:
-        q = inputs.category_id or "marketplace"
-    max_p = int(max(0, min(inputs.max_price, 1_000_000)))
-    return (
-        "https://www.facebook.com/marketplace/search/?query="
-        + quote_plus(q)
-        + f"&maxPrice={max_p}"
-    )
+        path = f"{base}/marketplace/search/"
+    return f"{path}?{urlencode(params)}"
+
+
+def _marketplace_filters_for_log(plan: SearchPlan) -> dict[str, object]:
+    return {
+        "max_price": int(max(0, min(plan.max_price, 1_000_000))),
+        "sort_by": plan.sort_mode,
+        "exact": False,
+        "category_path": plan.marketplace_category_slug,
+        "location_text": plan.location_text,
+        "radius_miles": round(plan.radius_miles, 2),
+    }
 
 
 def _normalize_fb_url(href: str) -> str:
@@ -85,6 +104,13 @@ def _normalize_fb_url(href: str) -> str:
     if href.startswith("http"):
         return href.split("?", 1)[0]
     return href
+
+
+def _raw_dedupe_key(raw: RawListing) -> str:
+    sid = (raw.source_id or "").strip()
+    if sid:
+        return sid
+    return _normalize_fb_url(raw.source_link)
 
 
 def _item_id_from_href(href: str) -> str | None:
@@ -183,6 +209,7 @@ async def _parse_facebook_marketplace_page(
     *,
     collection_inputs: CollectionInputs,
     backfill: bool,
+    max_items: int | None = None,
 ) -> list[RawListing]:
     """Parse search results: listing links and visible card text (price/title heuristics)."""
     await page.wait_for_load_state("domcontentloaded")
@@ -192,7 +219,8 @@ async def _parse_facebook_marketplace_page(
         logger.warning("No marketplace item links found within timeout: %s", exc)
 
     links = await page.query_selector_all('a[href*="/marketplace/item/"]')
-    max_items = 50 if backfill else 15
+    if max_items is None:
+        max_items = 50 if backfill else 15
     seen: set[str] = set()
     out: list[RawListing] = []
     cat = (collection_inputs.category_id or "general").strip()
@@ -263,12 +291,23 @@ async def fetch_listings_playwright(
         "no",
     )
 
+    plan = collection_inputs.search_plan
     logger.info(
         "Playwright collector starting (stub=%s headless=%s backfill=%s user_id=%s)",
         use_stub,
         headless,
         backfill,
         collection_inputs.user_id,
+    )
+    logger.info(
+        "Search plan (structured) user_id=%s: %s",
+        plan.user_id,
+        plan.to_log_dict(),
+    )
+    logger.info(
+        "Built-in filters (Marketplace URL) user_id=%s: %s",
+        plan.user_id,
+        _marketplace_filters_for_log(plan),
     )
     logger.info("Facebook auth state loaded from %s", auth_path)
 
@@ -289,15 +328,49 @@ async def fetch_listings_playwright(
                         stub_path=stub_path,
                     )
                 else:
-                    url = _build_marketplace_search_url(collection_inputs)
-                    host = urlparse(url).netloc
-                    logger.info("Marketplace search started: %s %s", host, url[:120])
-                    await page.goto(url, wait_until="domcontentloaded")
-                    out = await _parse_facebook_marketplace_page(
-                        page,
-                        collection_inputs=collection_inputs,
-                        backfill=backfill,
-                    )
+                    queries = plan.focused_queries or [""]
+                    n_q = len(queries)
+                    total_cap = 50 if backfill else 15
+                    per_cap = max(1, (total_cap + n_q - 1) // n_q)
+                    merged: list[RawListing] = []
+                    seen_keys: set[str] = set()
+                    for idx, fq in enumerate(queries):
+                        url = build_marketplace_search_url(plan, fq)
+                        q_for_log = fq.strip() if fq.strip() else None
+                        logger.info(
+                            "Marketplace run %s/%s user_id=%s focused_query=%r per_search_cap=%s url=%s",
+                            idx + 1,
+                            n_q,
+                            plan.user_id,
+                            q_for_log,
+                            per_cap,
+                            url,
+                        )
+                        await page.goto(url, wait_until="domcontentloaded")
+                        batch = await _parse_facebook_marketplace_page(
+                            page,
+                            collection_inputs=collection_inputs,
+                            backfill=backfill,
+                            max_items=per_cap,
+                        )
+                        logger.info(
+                            "Marketplace run %s/%s user_id=%s candidates_parsed=%s (dedupe before merge)",
+                            idx + 1,
+                            n_q,
+                            plan.user_id,
+                            len(batch),
+                        )
+                        for r in batch:
+                            dk = _raw_dedupe_key(r)
+                            if dk in seen_keys:
+                                continue
+                            seen_keys.add(dk)
+                            merged.append(r)
+                            if len(merged) >= total_cap:
+                                break
+                        if len(merged) >= total_cap:
+                            break
+                    out = merged[:total_cap]
                 logger.info(
                     "Listings found: %s (source=%s)",
                     len(out),
