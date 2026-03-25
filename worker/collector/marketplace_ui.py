@@ -2,10 +2,10 @@
 Facebook Marketplace: apply built-in filters via the logged-in web UI (Playwright async).
 
 Facebook changes markup frequently; selectors use roles/labels with fallbacks. Location and radius
-are required for a meaningful search. The Filters drawer (sort, and Date listed in category mode
-only) is best-effort: if it cannot be opened or controls fail, the collector continues with the
-category feed or keyword queries using location/radius and category path. No user-configurable price
-cap is applied in Marketplace UI.
+are required for a meaningful search. Sort and Date listed (category mode) resolve from inline
+left-column filters, a Filters dialog, or a page-level probe — not only from opening the drawer.
+If controls still fail, the collector continues with location/radius and category path. No
+user-configurable price cap is applied in Marketplace UI.
 """
 
 from __future__ import annotations
@@ -193,19 +193,84 @@ async def _fill_location_and_radius_in_dialog(page, plan: SearchPlan) -> None:
     await page.wait_for_timeout(400)
 
 
+async def _scroll_main_for_filters(page) -> None:
+    """Category pages may mount the filter rail below the fold; nudge layout before detection."""
+    main = page.locator('[role="main"]')
+    if await main.count() < 1:
+        return
+    try:
+        await main.first.evaluate("el => el.scrollTo(0, 0)")
+        await page.wait_for_timeout(200)
+        await main.first.evaluate("el => el.scrollTo(0, Math.min(el.scrollHeight, 400))")
+        await page.wait_for_timeout(250)
+    except Exception:
+        pass
+
+
+async def _locator_visible_and_enabled(loc) -> bool:
+    try:
+        if await loc.count() < 1:
+            return False
+        el = loc.first
+        vis = await el.is_visible()
+        if not vis:
+            return False
+        try:
+            dis = await el.is_disabled()
+            if dis:
+                return False
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+async def _date_listed_text_locator_in_scope(scope):
+    """Match Facebook copy variants (Date listed, Listed date, etc.)."""
+    patterns = (
+        re.compile(r"date\s*listed", re.I),
+        re.compile(r"listed\s*date", re.I),
+        re.compile(r"date\s+posted", re.I),
+    )
+    for pat in patterns:
+        loc = scope.get_by_text(pat)
+        try:
+            if await loc.count() > 0:
+                return loc.first, f"text:{pat.pattern}"
+        except Exception:
+            continue
+    return None, "no_date_listed_text_match"
+
+
 async def _left_sidebar_filters_visible(page) -> tuple[bool, str]:
     """
     Desktop category pages often show Filters + Date listed in the main column without a drawer.
+    Uses several layouts: aside, filter rail divs, labels, aria.
     """
     main = page.locator('[role="main"]')
     if await main.count() < 1:
         return False, "no_main_landmark"
+
+    await _scroll_main_for_filters(page)
+
     try:
-        dl = main.get_by_text(re.compile(r"date\s*listed", re.I)).first
-        if await dl.count() > 0 and await dl.is_visible():
+        dl, _detail = await _date_listed_text_locator_in_scope(main)
+        if dl is not None and await _locator_visible_and_enabled(dl):
             return True, "date_listed_visible_in_main"
     except Exception:
         pass
+
+    try:
+        for lab in (
+            main.get_by_label(re.compile(r"date\s*listed", re.I)),
+            main.locator('label:has-text("Date")').filter(has_text=re.compile(r"listed", re.I)),
+        ):
+            if await lab.count() > 0 and await lab.first.is_visible():
+                return True, "date_listed_label_in_main"
+    except Exception:
+        pass
+
     try:
         aside = main.locator("aside").first
         if await aside.count() > 0 and await aside.is_visible():
@@ -216,13 +281,201 @@ async def _left_sidebar_filters_visible(page) -> tuple[bool, str]:
                 return True, "aside_sidebar_visible"
     except Exception:
         pass
+
     try:
-        col = main.locator('[data-pagelet*="Filter" i], [data-testid*="filter" i]').first
+        col = main.locator(
+            '[data-pagelet*="Filter" i], [data-testid*="filter" i], '
+            '[class*="filter" i], [class*="Filter" i]'
+        ).first
         if await col.count() > 0 and await col.is_visible():
-            return True, "filter_container_visible"
+            t = (await col.inner_text() or "")[:4000]
+            if re.search(r"date\s*listed|sort|condition|price", t, re.I):
+                return True, "filter_container_visible"
     except Exception:
         pass
+
+    # Whole-page fallback: filter rail sometimes not under [role=main] in SPA shells.
+    try:
+        dl, _d = await _date_listed_text_locator_in_scope(page)
+        if dl is not None and await _locator_visible_and_enabled(dl):
+            return True, "date_listed_visible_page_scope"
+    except Exception:
+        pass
+
     return False, "left_sidebar_filters_not_detected"
+
+
+async def _probe_date_listed_root(page) -> tuple[Any, str, str]:
+    """
+    Find a locator scope that contains a visible Date listed control (main, dialog, or full page).
+    Returns (root, short_label, detail) or (None, \"none\", reason).
+    """
+    await _scroll_main_for_filters(page)
+
+    dialog = page.locator('[role="dialog"]').first
+    if await dialog.count() > 0:
+        try:
+            if await dialog.is_visible():
+                dl, _pat = await _date_listed_text_locator_in_scope(dialog)
+                if dl is not None and await _locator_visible_and_enabled(dl):
+                    return dialog, "dialog", "date_listed_in_visible_dialog"
+        except Exception:
+            pass
+
+    main = page.locator('[role="main"]')
+    if await main.count() > 0:
+        try:
+            dl, pat = await _date_listed_text_locator_in_scope(main)
+            if dl is not None:
+                await dl.scroll_into_view_if_needed()
+                await page.wait_for_timeout(200)
+                if await _locator_visible_and_enabled(dl):
+                    return main, "inline_main", f"date_listed_in_main:{pat}"
+        except Exception:
+            pass
+
+    try:
+        dl, pat = await _date_listed_text_locator_in_scope(page)
+        if dl is not None:
+            await dl.scroll_into_view_if_needed()
+            await page.wait_for_timeout(200)
+            if await _locator_visible_and_enabled(dl):
+                return page, "page", f"date_listed_page_scope:{pat}"
+    except Exception:
+        pass
+
+    return None, "none", "date_listed_not_found_anywhere"
+
+
+async def _discover_filters_surface(page) -> dict[str, Any]:
+    """
+    Resolve where filters live: inline left column, Filters dialog, or probed Date listed region.
+    Unlike drawer-only flow, does not give up if the drawer click does not match heuristics.
+    """
+    discovery_log: list[str] = []
+
+    await _scroll_main_for_filters(page)
+    left_ok, left_reason = await _left_sidebar_filters_visible(page)
+    discovery_log.append(f"inline_first:{left_ok}:{left_reason}")
+
+    if left_ok:
+        return {
+            "surface_ready": True,
+            "inline_filters_found": True,
+            "drawer_mode": False,
+            "drawer_info": {
+                "opened": False,
+                "already_visible": True,
+                "selector_used": left_reason,
+                "attempt_log": [f"inline_filters: {left_reason}"],
+                "surface": "left_sidebar",
+            },
+            "discovery_log": discovery_log,
+        }
+
+    drawer_info = await _try_open_filters_drawer(page)
+    opened = bool(drawer_info.get("opened") or drawer_info.get("already_visible"))
+    discovery_log.append(
+        f"drawer_try:opened={opened}:surface={drawer_info.get('surface')}"
+    )
+
+    if opened:
+        is_dialog = drawer_info.get("surface") == "filters_dialog"
+        return {
+            "surface_ready": True,
+            "inline_filters_found": drawer_info.get("surface") == "left_sidebar",
+            "drawer_mode": is_dialog,
+            "drawer_info": drawer_info,
+            "discovery_log": discovery_log,
+        }
+
+    await page.wait_for_timeout(450)
+    await _scroll_main_for_filters(page)
+    left_ok2, left_reason2 = await _left_sidebar_filters_visible(page)
+    discovery_log.append(f"inline_retry:{left_ok2}:{left_reason2}")
+
+    if left_ok2:
+        return {
+            "surface_ready": True,
+            "inline_filters_found": True,
+            "drawer_mode": False,
+            "drawer_info": {
+                "opened": False,
+                "already_visible": True,
+                "selector_used": left_reason2,
+                "attempt_log": [f"inline_retry: {left_reason2}"],
+                "surface": "left_sidebar",
+            },
+            "discovery_log": discovery_log,
+        }
+
+    probe_root, probe_label, probe_detail = await _probe_date_listed_root(page)
+    discovery_log.append(f"probe:{probe_label}:{probe_detail}")
+
+    if probe_root is not None:
+        surf = "left_sidebar" if probe_label == "inline_main" else (
+            "filters_dialog" if probe_label == "dialog" else "page_fallback"
+        )
+        return {
+            "surface_ready": True,
+            "inline_filters_found": probe_label == "inline_main",
+            "drawer_mode": probe_label == "dialog",
+            "drawer_info": {
+                "opened": False,
+                "already_visible": True,
+                "selector_used": probe_detail,
+                "attempt_log": [f"probe:{probe_detail}"],
+                "surface": surf,
+                "probe_root_hint": probe_label,
+            },
+            "discovery_log": discovery_log,
+        }
+
+    return {
+        "surface_ready": False,
+        "inline_filters_found": False,
+        "drawer_mode": False,
+        "drawer_info": drawer_info,
+        "discovery_log": discovery_log,
+    }
+
+
+async def _find_best_filters_root(page, drawer_info: dict[str, Any]) -> tuple[Any, str]:
+    """
+    Choose the DOM root for Sort + Date listed. Honors probe hints from _discover_filters_surface.
+    """
+    surf = drawer_info.get("surface")
+    hint = drawer_info.get("probe_root_hint")
+
+    if hint == "page":
+        logger.info("Marketplace UI: filters root=page (Date listed probe)")
+        return page, "page_fallback"
+
+    if hint == "dialog":
+        logger.info("Marketplace UI: filters root=dialog (Date listed probe)")
+        return page.locator('[role="dialog"]').first, "filters_dialog_probe"
+
+    if surf == "page_fallback":
+        logger.info("Marketplace UI: filters root=page (surface=page_fallback)")
+        return page, "page_fallback"
+
+    if surf == "left_sidebar":
+        logger.info("Marketplace UI: filters root=left main column (inline sidebar)")
+        return page.locator('[role="main"]'), "left_sidebar_main"
+
+    if await _filters_panel_looks_open(page):
+        logger.info("Marketplace UI: filters root=dialog overlay")
+        return page.locator('[role="dialog"]').first, "filters_dialog"
+
+    if drawer_info.get("opened"):
+        logger.info("Marketplace UI: filters root=dialog (opened via UI click)")
+        return page.locator('[role="dialog"]').first, "filters_dialog_opened"
+
+    main = page.locator('[role="main"]')
+    if await main.count() > 0:
+        return main, "main_fallback"
+
+    return page, "page_fallback"
 
 
 async def _filters_panel_looks_open(page) -> bool:
@@ -380,35 +633,52 @@ async def _try_open_filters_drawer(page) -> dict[str, Any]:
     }
 
 
-async def _resolve_filters_root(page, drawer_info: dict[str, Any]) -> tuple[Any, str]:
-    """Prefer left main column when category page shows inline filters; else Filters dialog."""
-    surf = drawer_info.get("surface")
-    if surf == "left_sidebar":
-        logger.info("Marketplace UI: filters root=left main column (inline sidebar)")
-        return page.locator('[role="main"]'), "left_sidebar_main"
-    if await _filters_panel_looks_open(page):
-        logger.info("Marketplace UI: filters root=dialog overlay")
-        return page.locator('[role="dialog"]').first, "filters_dialog"
-    if drawer_info.get("opened"):
-        logger.info("Marketplace UI: filters root=dialog (opened via UI click)")
-        return page.locator('[role="dialog"]').first, "filters_dialog_opened"
-    return page.locator('[role="dialog"]').first, "dialog_fallback"
-
-
 async def _verify_date_listed_24h_applied(page, root) -> tuple[bool, str]:
-    """Best-effort confirmation that a 24h-style label is visible after selection."""
+    """Confirm 24h filter: visible chip/label, selected option, or aria state."""
+    scopes = [root, page]
+    if root is not page:
+        scopes.append(page.locator('[role="main"]'))
+
+    # Selected menu/listbox option or radio
+    for scope in scopes:
+        try:
+            for sel in (
+                scope.locator('[role="option"][aria-selected="true"]'),
+                scope.locator('[role="menuitemradio"][aria-checked="true"]'),
+                scope.locator('[aria-selected="true"]'),
+            ):
+                if await sel.count() < 1:
+                    continue
+                for i in range(min(await sel.count(), 12)):
+                    el = sel.nth(i)
+                    try:
+                        t = (await el.inner_text() or "")[:200]
+                        if re.search(
+                            r"24\s*hours?|past\s*24|last\s*24|past\s*day|today",
+                            t,
+                            re.I,
+                        ):
+                            return True, f"aria_selected:{t[:80]!r}"
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+
     for rx in (
         re.compile(r"last\s*24\s*hours?", re.I),
         re.compile(r"past\s*24\s*hours?", re.I),
         re.compile(r"^\s*24\s*hours?\s*$", re.I),
         re.compile(r"past\s*day", re.I),
+        re.compile(r"\b24\s*h\b", re.I),
     ):
-        try:
-            loc = root.get_by_text(rx).first
-            if await loc.count() and await loc.is_visible():
-                return True, f"visible_label:{rx.pattern}"
-        except Exception:
-            continue
+        for scope in scopes:
+            try:
+                loc = scope.get_by_text(rx).first
+                if await loc.count() and await loc.is_visible():
+                    return True, f"visible_label:{rx.pattern}"
+            except Exception:
+                continue
+
     try:
         page_loc = page.get_by_text(
             re.compile(r"last\s*24\s*hours?|past\s*24|24\s*hours?", re.I)
@@ -427,7 +697,10 @@ async def _set_date_listed_to_24_hours(page, root, *, surface_label: str) -> Non
     Facebook labels vary (\"24 hours\", \"Last 24 hours\", \"Past day\"); we try several.
     """
     try:
-        await root.wait_for(state="visible", timeout=8000)
+        if root is page:
+            await page.wait_for_load_state("domcontentloaded")
+        else:
+            await root.wait_for(state="visible", timeout=8000)
     except Exception as exc:
         raise MarketplaceFilterError(
             f"Filters region not visible ({surface_label})."
@@ -520,7 +793,10 @@ async def _set_date_listed_to_24_hours(page, root, *, surface_label: str) -> Non
 async def _set_sort_in_filters(page, plan: SearchPlan, root) -> None:
     label = _sort_label_for_plan(plan)
     try:
-        await root.wait_for(state="visible", timeout=8000)
+        if root is page:
+            await page.wait_for_load_state("domcontentloaded")
+        else:
+            await root.wait_for(state="visible", timeout=8000)
     except Exception as exc:
         raise MarketplaceFilterError("Filters region missing for sort.") from exc
 
@@ -809,7 +1085,12 @@ async def apply_marketplace_filters_ui(
         "filters_surface": None,
         "date_listed_verify_ok": False,
         "date_listed_verify_detail": None,
-        "filters_confirmed": False,
+        "filters_inline_detected": False,
+        "filters_drawer_mode": False,
+        "filters_surface_resolved": False,
+        "filters_surface_discovery_log": [],
+        "date_listed_section_found": False,
+        "date_listed_last_24h_clicked": False,
     }
 
     # Location + radius (required for meaningful geo-scoped search).
@@ -832,8 +1113,14 @@ async def apply_marketplace_filters_ui(
         ls_reason,
     )
 
-    # Price + sort (Filters drawer) — best-effort.
-    drawer_info = await _try_open_filters_drawer(page)
+    disc = await _discover_filters_surface(page)
+    drawer_info = disc["drawer_info"]
+    surface_ready = bool(disc["surface_ready"])
+    applied["filters_inline_detected"] = bool(disc.get("inline_filters_found"))
+    applied["filters_drawer_mode"] = bool(disc.get("drawer_mode"))
+    applied["filters_surface_resolved"] = surface_ready
+    applied["filters_surface_discovery_log"] = list(disc.get("discovery_log") or [])
+
     applied["filters_drawer_opened"] = bool(
         drawer_info.get("opened") or drawer_info.get("already_visible")
     )
@@ -842,152 +1129,231 @@ async def apply_marketplace_filters_ui(
     applied["filters_drawer_attempts"] = drawer_info.get("attempt_log", [])
     applied["filters_surface"] = drawer_info.get("surface")
 
-    if not applied["filters_drawer_opened"]:
-        applied["degraded_mode"] = True
-        applied["sort_ui"] = "skipped_no_drawer"
-        if (plan.search_mode or "").strip() == "marketplace_category":
-            applied["date_listed_skipped_reason"] = "filters_drawer_not_open"
+    logger.info(
+        "Marketplace UI: filters_surface_discovery user_id=%s resolved=%s inline=%s drawer_mode=%s "
+        "surface=%s log=%s",
+        plan.user_id,
+        surface_ready,
+        applied["filters_inline_detected"],
+        applied["filters_drawer_mode"],
+        applied.get("filters_surface"),
+        applied["filters_surface_discovery_log"],
+    )
+
+    if not surface_ready:
+        applied["sort_ui"] = "skipped_no_filter_surface"
         fs = drawer_info.get("failure_summary") or (
             "; ".join(drawer_info.get("attempt_log") or []) or "unknown"
         )
         applied["worker_collector_warning"] = (
-            "Marketplace sort filter was skipped: Filters drawer did not open. "
+            "Marketplace filter surface not detected (inline, dialog, or Date listed probe). "
             f"Details: {fs[:400]}"
         )
         logger.warning(
-            "Marketplace UI: degraded mode user_id=%s — continuing with location/radius + category entry only. %s",
+            "Marketplace UI: filter surface unresolved user_id=%s — will try Date listed on page "
+            "if category mode. %s",
             plan.user_id,
             applied["worker_collector_warning"][:500],
         )
-    else:
-        filters_root, surface_label = await _resolve_filters_root(page, drawer_info)
-        applied["filters_surface"] = surface_label
+
+    filters_root, surface_label = await _find_best_filters_root(page, drawer_info)
+    applied["filters_surface"] = surface_label
+
+    logger.info(
+        "Marketplace UI: filters_root_ready user_id=%s surface=%s surface_ready=%s drawer_info=%s",
+        plan.user_id,
+        surface_label,
+        surface_ready,
+        {
+            "opened": drawer_info.get("opened"),
+            "already_visible": drawer_info.get("already_visible"),
+            "surface": drawer_info.get("surface"),
+            "probe_root_hint": drawer_info.get("probe_root_hint"),
+        },
+    )
+
+    sm_cat = (plan.search_mode or "").strip() == "marketplace_category"
+
+    if sm_cat:
+        applied["date_listed_filter_attempted"] = True
+        applied["date_listed_skipped_reason"] = None
         logger.info(
-            "Marketplace UI: filters_root_ready user_id=%s surface=%s drawer_info=%s",
+            "Marketplace UI: Date listed filter (24h) attempting user_id=%s mode=%s surface=%s "
+            "surface_ready=%s",
+            plan.user_id,
+            plan.search_mode,
+            surface_label,
+            surface_ready,
+        )
+        try:
+            await _set_date_listed_to_24_hours(page, filters_root, surface_label=surface_label)
+            applied["date_listed_section_found"] = True
+            applied["date_listed_last_24h_clicked"] = True
+            applied["date_listed_24h_selected"] = True
+            ok, detail = await _verify_date_listed_24h_applied(page, filters_root)
+            applied["date_listed_verify_ok"] = ok
+            applied["date_listed_verify_detail"] = detail
+            logger.info(
+                "Marketplace UI: Date listed 24h done user_id=%s verify_ok=%s verify_detail=%s "
+                "section_found=%s last24_clicked=%s",
+                plan.user_id,
+                ok,
+                detail,
+                applied["date_listed_section_found"],
+                applied["date_listed_last_24h_clicked"],
+            )
+        except Exception as exc:
+            err_s = f"{type(exc).__name__}: {str(exc)[:400]}"
+            applied["date_listed_error"] = err_s
+            if "Date listed control not found" in str(exc):
+                applied["date_listed_section_found"] = False
+            elif "Could not select a 24-hour" in str(exc) or "24-hour" in str(exc):
+                applied["date_listed_section_found"] = True
+                applied["date_listed_last_24h_clicked"] = False
+            logger.warning(
+                "Marketplace UI: Date listed 24h not applied user_id=%s surface=%s reason=%s",
+                plan.user_id,
+                surface_label,
+                exc,
+                exc_info=True,
+            )
+            if surface_label not in ("page_fallback",):
+                logger.info(
+                    "Marketplace UI: retry Date listed with full page root user_id=%s",
+                    plan.user_id,
+                )
+                try:
+                    await _set_date_listed_to_24_hours(
+                        page, page, surface_label="last_resort_page"
+                    )
+                    applied["date_listed_section_found"] = True
+                    applied["date_listed_last_24h_clicked"] = True
+                    applied["date_listed_24h_selected"] = True
+                    ok, detail = await _verify_date_listed_24h_applied(page, page)
+                    applied["date_listed_verify_ok"] = ok
+                    applied["date_listed_verify_detail"] = detail
+                    applied["date_listed_error"] = None
+                    logger.info(
+                        "Marketplace UI: Date listed 24h succeeded after page-root retry user_id=%s",
+                        plan.user_id,
+                    )
+                except Exception as exc2:
+                    applied["date_listed_error"] = (
+                        f"{err_s} | retry: {type(exc2).__name__}: {str(exc2)[:200]}"
+                    )
+                    applied["date_listed_skipped_reason"] = "date_listed_unreachable"
+                    logger.warning(
+                        "Marketplace UI: Date listed page-root retry failed user_id=%s: %s",
+                        plan.user_id,
+                        exc2,
+                    )
+
+        if not applied.get("date_listed_24h_selected"):
+            applied["degraded_mode"] = True
+            prev = (applied.get("worker_collector_warning") or "").strip()
+            extra = (
+                "Date listed filter (24 hours) could not be applied. "
+                f"Surface={surface_label}. Details: {(applied.get('date_listed_error') or '')[:280]}"
+            )
+            applied["worker_collector_warning"] = f"{prev} | {extra}" if prev else extra
+    else:
+        applied["date_listed_skipped_reason"] = "not_marketplace_category_mode"
+        logger.info(
+            "Marketplace UI: Date listed filter skipped (search_mode=%s) user_id=%s",
+            plan.search_mode,
+            plan.user_id,
+        )
+
+    try:
+        await _set_sort_in_filters(page, plan, filters_root)
+        applied["sort_ui"] = "applied"
+    except Exception as exc:
+        applied["sort_ui"] = f"skipped: {type(exc).__name__}: {exc!r}"
+        applied["degraded_mode"] = True
+        logger.warning(
+            "Marketplace UI: sort not applied user_id=%s surface=%s: %s",
             plan.user_id,
             surface_label,
-            {
-                "opened": drawer_info.get("opened"),
-                "already_visible": drawer_info.get("already_visible"),
-                "surface": drawer_info.get("surface"),
-            },
+            exc,
+            exc_info=True,
         )
 
-        # Date listed = 24 hours — only in marketplace_category mode (not custom keyword searches).
-        if (plan.search_mode or "").strip() == "marketplace_category":
-            applied["date_listed_filter_attempted"] = True
+    try:
+        confirmed = await _apply_filters_confirm(page)
+        if not confirmed and surface_label in (
+            "left_sidebar_main",
+            "main_fallback",
+            "page_fallback",
+            "filters_dialog_probe",
+        ):
+            confirmed = True
             logger.info(
-                "Marketplace UI: Date listed filter (24h) attempting user_id=%s mode=%s surface=%s",
+                "Marketplace UI: treating filters as applied (inline or page scope; no modal Apply) "
+                "user_id=%s surface=%s",
                 plan.user_id,
-                plan.search_mode,
                 surface_label,
             )
-            try:
-                await _set_date_listed_to_24_hours(page, filters_root, surface_label=surface_label)
-                applied["date_listed_24h_selected"] = True
-                ok, detail = await _verify_date_listed_24h_applied(page, filters_root)
-                applied["date_listed_verify_ok"] = ok
-                applied["date_listed_verify_detail"] = detail
-                logger.info(
-                    "Marketplace UI: Date listed 24h click done user_id=%s verify_ok=%s verify_detail=%s",
-                    plan.user_id,
-                    ok,
-                    detail,
-                )
-            except Exception as exc:
-                applied["date_listed_error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
-                applied["degraded_mode"] = True
-                logger.warning(
-                    "Marketplace UI: Date listed 24h not applied user_id=%s surface=%s reason=%s",
-                    plan.user_id,
-                    surface_label,
-                    exc,
-                    exc_info=True,
-                )
-                prev = (applied.get("worker_collector_warning") or "").strip()
-                extra = (
-                    "Date listed filter (24 hours) could not be applied. "
-                    f"Surface={surface_label}. Details: {applied['date_listed_error'][:280]}"
-                )
-                applied["worker_collector_warning"] = (
-                    f"{prev} | {extra}" if prev else extra
-                )
-        else:
-            applied["date_listed_skipped_reason"] = "not_marketplace_category_mode"
-            logger.info(
-                "Marketplace UI: Date listed filter skipped (search_mode=%s) user_id=%s",
-                plan.search_mode,
-                plan.user_id,
-            )
-
-        # Sort (Filters region: dialog or left column)
-        try:
-            await _set_sort_in_filters(page, plan, filters_root)
-            applied["sort_ui"] = "applied"
-        except Exception as exc:
-            applied["sort_ui"] = f"skipped: {type(exc).__name__}: {exc!r}"
-            applied["degraded_mode"] = True
-            logger.warning(
-                "Marketplace UI: sort not applied user_id=%s surface=%s: %s",
-                plan.user_id,
-                surface_label,
-                exc,
-                exc_info=True,
-            )
-
-        # Confirm / apply filters panel (modal only)
-        try:
-            confirmed = await _apply_filters_confirm(page)
-            if not confirmed and surface_label == "left_sidebar_main":
-                confirmed = True
-                logger.info(
-                    "Marketplace UI: treating filters as applied (inline left sidebar; no modal Apply) user_id=%s",
-                    plan.user_id,
-                )
-            applied["filters_confirmed"] = bool(confirmed)
-        except Exception as exc:
-            applied["filters_confirmed"] = False
-            applied["degraded_mode"] = True
-            logger.warning(
-                "Marketplace UI: Filters confirm failed user_id=%s: %s",
-                plan.user_id,
-                exc,
-                exc_info=True,
-            )
-
-        applied["date_listed_applied_and_panel_confirmed"] = bool(
-            applied.get("date_listed_24h_selected") and applied.get("filters_confirmed")
+        applied["filters_confirmed"] = bool(confirmed)
+    except Exception as exc:
+        applied["filters_confirmed"] = False
+        applied["degraded_mode"] = True
+        logger.warning(
+            "Marketplace UI: Filters confirm failed user_id=%s: %s",
+            plan.user_id,
+            exc,
+            exc_info=True,
         )
-        if applied.get("date_listed_filter_attempted") and applied.get("date_listed_24h_selected"):
-            logger.info(
-                "Marketplace UI: Date listed 24h sealed by Apply user_id=%s ok=%s",
-                plan.user_id,
-                applied["date_listed_applied_and_panel_confirmed"],
-            )
 
-        if applied["degraded_mode"] and not applied.get("worker_collector_warning"):
-            applied["worker_collector_warning"] = (
-                "Marketplace sort filter could not be fully applied (sort and/or confirm). "
-                "Search uses location/radius and category."
+    applied["date_listed_applied_and_panel_confirmed"] = bool(
+        applied.get("date_listed_24h_selected")
+        and (
+            applied.get("filters_confirmed")
+            or surface_label
+            in (
+                "page_fallback",
+                "left_sidebar_main",
+                "main_fallback",
+                "filters_dialog_probe",
             )
-            logger.warning(
-                "Marketplace UI: degraded mode user_id=%s — partial advanced filters",
-                plan.user_id,
-            )
+        )
+    )
+    if sm_cat and applied.get("date_listed_24h_selected") and applied.get("date_listed_verify_ok"):
+        logger.info(
+            "Marketplace UI: Date listed 24h confirmed user_id=%s panel_ok=%s verify=%s",
+            plan.user_id,
+            applied["date_listed_applied_and_panel_confirmed"],
+            applied.get("date_listed_verify_detail"),
+        )
+
+    if applied["degraded_mode"] and not applied.get("worker_collector_warning"):
+        applied["worker_collector_warning"] = (
+            "Marketplace advanced filters could not be fully applied. "
+            "Search uses location/radius and category."
+        )
+        logger.warning(
+            "Marketplace UI: degraded mode user_id=%s — partial advanced filters",
+            plan.user_id,
+        )
 
     logger.info(
         "Marketplace UI: filter cycle summary user_id=%s location_radius_ok=%s drawer_open=%s "
-        "degraded=%s sort=%s confirmed=%s surface=%s date_listed_attempted=%s date_listed_24h=%s "
+        "surface_resolved=%s inline_filters=%s drawer_mode=%s degraded=%s sort=%s confirmed=%s "
+        "surface=%s date_listed_attempted=%s date_listed_24h=%s section_found=%s last24_clicked=%s "
         "date_verify_ok=%s date_err=%s",
         plan.user_id,
         applied["location_radius_ok"],
         applied["filters_drawer_opened"],
+        applied.get("filters_surface_resolved"),
+        applied.get("filters_inline_detected"),
+        applied.get("filters_drawer_mode"),
         applied["degraded_mode"],
         applied["sort_ui"],
         applied.get("filters_confirmed"),
         applied.get("filters_surface"),
         applied.get("date_listed_filter_attempted"),
         applied.get("date_listed_24h_selected"),
+        applied.get("date_listed_section_found"),
+        applied.get("date_listed_last_24h_clicked"),
         applied.get("date_listed_verify_ok"),
         (applied.get("date_listed_error") or "")[:120] or None,
     )
