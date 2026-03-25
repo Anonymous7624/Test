@@ -38,6 +38,37 @@ from .marketplace_ui import (
 logger = logging.getLogger(__name__)
 
 
+async def _safe_close_playwright(label: str, close_coro) -> None:
+    """
+    Close a Playwright handle without turning teardown into a fatal fetch error.
+
+    Double-close and \"already closed\" races are common; a raised exception in ``finally``
+    would otherwise suppress a successful ``return`` from the collector.
+    """
+    try:
+        await close_coro
+    except Exception as exc:  # noqa: BLE001 — teardown must not fail the batch
+        msg = str(exc).lower()
+        benign = (
+            "has been closed" in msg
+            or "target closed" in msg
+            or "browser has been closed" in msg
+            or "context has been closed" in msg
+        )
+        if benign:
+            logger.warning(
+                "Playwright cleanup: %s already closed or gone (ignored): %s",
+                label,
+                exc,
+            )
+        else:
+            logger.warning(
+                "Playwright cleanup: %s close raised (ignored): %s",
+                label,
+                exc,
+            )
+
+
 def _int_env(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, str(default)).strip())
@@ -433,27 +464,28 @@ async def fetch_listings_playwright(
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
+        context = None
+        page = None
         try:
             context = await browser.new_context(storage_state=str(auth_path))
-            try:
-                page = await context.new_page()
-                page.set_default_timeout(60_000)
+            page = await context.new_page()
+            page.set_default_timeout(60_000)
 
-                if use_stub:
-                    logger.info("Search target: local stub file %s (no Marketplace URL)", stub_path)
-                    out = await _parse_stub_page(
-                        page,
-                        collection_inputs=collection_inputs,
-                        backfill=backfill,
-                        stub_path=stub_path,
-                    )
-                    logger.info(
-                        "Listings found: %s (source=%s)",
-                        len(out),
-                        "playwright_stub",
-                    )
-                    return out, {}
-                else:
+            if use_stub:
+                logger.info("Search target: local stub file %s (no Marketplace URL)", stub_path)
+                out = await _parse_stub_page(
+                    page,
+                    collection_inputs=collection_inputs,
+                    backfill=backfill,
+                    stub_path=stub_path,
+                )
+                logger.info(
+                    "Collector success: listings=%s source=playwright_stub user_id=%s",
+                    len(out),
+                    collection_inputs.user_id,
+                )
+                return out, {}
+            else:
                     total_cap = _int_env(
                         "WORKER_COLLECTOR_BATCH_CAP", 600 if backfill else 400
                     )
@@ -595,18 +627,26 @@ async def fetch_listings_playwright(
                         "degraded_mode": bool(ui_applied.get("degraded_mode")),
                         "worker_collector_warning": ui_applied.get("worker_collector_warning"),
                     }
-                logger.info(
-                    "Listings found: %s (source=%s)",
-                    len(out),
-                    "playwright_stub" if use_stub else "facebook_marketplace",
-                )
-                if not use_stub and len(out) == 0:
-                    logger.warning(
-                        "No listings parsed from Marketplace HTML — check auth state, "
-                        "UI filter selectors, search results, or DOM changes."
+                    logger.info(
+                        "Collector success: listings=%s source=%s user_id=%s",
+                        len(out),
+                        "facebook_marketplace",
+                        collection_inputs.user_id,
                     )
-                return out, collector_meta
-            finally:
-                await context.close()
+                    if len(out) == 0:
+                        logger.warning(
+                            "No listings parsed from Marketplace HTML — check auth state, "
+                            "UI filter selectors, search results, or DOM changes."
+                        )
+                    return out, collector_meta
         finally:
-            await browser.close()
+            if page is not None:
+                await _safe_close_playwright("page", page.close())
+            if context is not None:
+                await _safe_close_playwright("context", context.close())
+            await _safe_close_playwright("browser", browser.close())
+            logger.info(
+                "Playwright cleanup completed safely (user_id=%s stub=%s)",
+                collection_inputs.user_id,
+                use_stub,
+            )

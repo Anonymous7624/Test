@@ -44,6 +44,8 @@ def _default_settings_doc(user_id: int) -> dict:
         "worker_count_alerts_sent": 0,
         "worker_pipeline_error": None,
         "worker_collector_warning": None,
+        "worker_last_collector_failure_at": None,
+        "worker_last_collector_failure_message": None,
     }
 
 
@@ -93,6 +95,8 @@ def settings_from_doc(doc: dict) -> UserSettingsState:
         worker_count_alerts_sent=int(d.get("worker_count_alerts_sent", 0)),
         worker_pipeline_error=d.get("worker_pipeline_error"),
         worker_collector_warning=d.get("worker_collector_warning"),
+        worker_last_collector_failure_at=d.get("worker_last_collector_failure_at"),
+        worker_last_collector_failure_message=d.get("worker_last_collector_failure_message"),
     )
 
 

@@ -50,6 +50,9 @@ class UserSettings:
     worker_pipeline_error: str | None = None
     # Set when Step 1 completes but Marketplace advanced UI filters were skipped (e.g. Filters drawer).
     worker_collector_warning: str | None = None
+    # Last collector failure (historical / debug); cleared when a later collection succeeds.
+    worker_last_collector_failure_at: datetime | None = None
+    worker_last_collector_failure_message: str | None = None
 
 
 @dataclass

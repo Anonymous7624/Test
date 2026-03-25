@@ -332,7 +332,7 @@ export default function SettingsPage() {
           ) : null}
           {worker?.last_error ? (
             <p className="mt-3 rounded-lg border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-200">
-              <span className="font-medium text-red-300/95">Last fatal worker error — </span>
+              <span className="font-medium text-red-300/95">Active worker fatal error — </span>
               {worker.last_error}
             </p>
           ) : null}
@@ -389,9 +389,15 @@ export default function SettingsPage() {
                   </dd>
                 </div>
                 <div className="sm:col-span-2">
-                  <dt className="text-zinc-600">Last fatal error (DB)</dt>
+                  <dt className="text-zinc-600">Last fatal error (raw DB)</dt>
                   <dd className="text-xs text-red-300/90">
-                    {(worker.admin_pipeline_snapshot.last_error as string | null) || "—"}
+                    {(worker.admin_pipeline_snapshot.last_error_db as string | null) || "—"}
+                  </dd>
+                </div>
+                <div className="sm:col-span-2">
+                  <dt className="text-zinc-600">Last fatal error (active / API)</dt>
+                  <dd className="text-xs text-emerald-200/90">
+                    {(worker.admin_pipeline_snapshot.last_error_active as string | null) || "—"}
                   </dd>
                 </div>
                 <div className="sm:col-span-2">

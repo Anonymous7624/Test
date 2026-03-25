@@ -97,7 +97,9 @@ def _reset_pipeline_cycle_counts(s: UserSettingsRow) -> None:
     s.worker_count_alerts_sent = 0
 
 
-def _begin_listing_collection(repo: UserRepository, s: UserSettingsRow, now: datetime) -> None:
+def _begin_listing_collection(
+    repo: UserRepository, s: UserSettingsRow, now: datetime, *, backfill: bool
+) -> None:
     """Persist pipeline state before Playwright/mock fetch (step 1)."""
     s.worker_last_batch_started_at = now
     s.worker_current_step = 1
@@ -105,9 +107,17 @@ def _begin_listing_collection(repo: UserRepository, s: UserSettingsRow, now: dat
     s.worker_pipeline_message = "Step 1: Looking for listings"
     s.worker_pipeline_error = None
     s.worker_collector_warning = None
+    # New batch — drop prior collector failure snapshot so the UI is not stuck on an old run.
+    s.worker_last_collector_failure_at = None
+    s.worker_last_collector_failure_message = None
     # New attempt — do not show the previous tick's fatal error while this cycle runs.
     s.last_error = None
     repo.replace_settings(s)
+    logger.info(
+        "Batch started: user_id=%s backfill=%s stage=collect_listings",
+        s.user_id,
+        backfill,
+    )
 
 
 def _after_listing_collection(
@@ -116,7 +126,15 @@ def _after_listing_collection(
     raws: list[RawListing],
     *,
     collector_meta: dict | None = None,
+    prior_collector_failure_message: str | None = None,
 ) -> None:
+    if prior_collector_failure_message:
+        logger.info(
+            "Collector recovered: user_id=%s raw_count=%s (after prior failure: %s)",
+            s.user_id,
+            len(raws),
+            prior_collector_failure_message[:200],
+        )
     s.worker_count_raw_collected = len(raws)
     meta = collector_meta or {}
     msg = f"Step 1: {len(raws)} listings found"
@@ -125,7 +143,14 @@ def _after_listing_collection(
     s.worker_pipeline_message = msg
     warn = meta.get("worker_collector_warning")
     s.worker_collector_warning = (str(warn)[:500] if warn else None)
+    # Collector succeeded — a prior tick may still have left last_error in DB until we clear it here.
+    s.last_error = None
     repo.replace_settings(s)
+    logger.info(
+        "Collector success (worker): user_id=%s raw_count=%s",
+        s.user_id,
+        len(raws),
+    )
 
 
 async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
@@ -139,17 +164,26 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
     if not s.backfill_complete:
         s.monitoring_state = "backfill"
         repo.replace_settings(s)
-        _begin_listing_collection(repo, s, now)
+        prior_collector_failure = s.worker_last_collector_failure_message
+        _begin_listing_collection(repo, s, now, backfill=True)
         try:
             raws, collector_meta = await _collect_raws(s, backfill=True)
         except Exception as exc:
             s.worker_current_state = "collector_error"
             s.worker_pipeline_error = str(exc)[:500]
             s.worker_pipeline_message = "Step 1: Collector failed"
+            s.worker_last_collector_failure_at = now
+            s.worker_last_collector_failure_message = str(exc)[:500]
             s.last_checked_at = now
             repo.replace_settings(s)
             raise
-        _after_listing_collection(repo, s, raws, collector_meta=collector_meta)
+        _after_listing_collection(
+            repo,
+            s,
+            raws,
+            collector_meta=collector_meta,
+            prior_collector_failure_message=prior_collector_failure,
+        )
         if raws:
             stats = process_batch(db, raws, profile=s, origin_type="backfill")
             print(
@@ -169,21 +203,35 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
         s.last_checked_at = now
         s.last_error = None
         repo.replace_settings(s)
+        logger.info(
+            "Batch finished: user_id=%s backfill=True raw_collected=%s monitoring=polling",
+            s.user_id,
+            s.worker_count_raw_collected,
+        )
         return
 
     s.monitoring_state = "polling"
     repo.replace_settings(s)
-    _begin_listing_collection(repo, s, now)
+    prior_collector_failure = s.worker_last_collector_failure_message
+    _begin_listing_collection(repo, s, now, backfill=False)
     try:
         raws, collector_meta = await _collect_raws(s, backfill=False)
     except Exception as exc:
         s.worker_current_state = "collector_error"
         s.worker_pipeline_error = str(exc)[:500]
         s.worker_pipeline_message = "Step 1: Collector failed"
+        s.worker_last_collector_failure_at = now
+        s.worker_last_collector_failure_message = str(exc)[:500]
         s.last_checked_at = now
         repo.replace_settings(s)
         raise
-    _after_listing_collection(repo, s, raws, collector_meta=collector_meta)
+    _after_listing_collection(
+        repo,
+        s,
+        raws,
+        collector_meta=collector_meta,
+        prior_collector_failure_message=prior_collector_failure,
+    )
     if raws:
         stats = process_batch(db, raws, profile=s, origin_type="live")
         print(
@@ -201,6 +249,11 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
     s.last_checked_at = now
     s.last_error = None
     repo.replace_settings(s)
+    logger.info(
+        "Batch finished: user_id=%s backfill=False raw_collected=%s monitoring=polling",
+        s.user_id,
+        s.worker_count_raw_collected,
+    )
 
 
 async def tick() -> None:

@@ -25,6 +25,22 @@ def _idle_pipeline_message(monitoring_enabled: bool) -> str:
     return "Monitoring off — no active pipeline." if not monitoring_enabled else "Waiting for worker tick."
 
 
+def _display_last_error(s: UserSettingsRow) -> str | None:
+    """
+    ``last_error`` in Mongo may be stale if ``monitoring_state`` was reset to polling after recovery.
+    Only treat it as an *active* fatal error while monitoring is in the error state (or when off).
+    """
+    raw = s.last_error
+    if not raw or not str(raw).strip():
+        return None
+    if not s.monitoring_enabled:
+        return str(raw)[:500]
+    st = (s.monitoring_state or "").strip().lower()
+    if st == "error":
+        return str(raw)[:500]
+    return None
+
+
 def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
     s = _user_settings(db, user)
     repo = ListingRepository(db)
@@ -69,7 +85,14 @@ def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
             "worker_pipeline_error": getattr(s, "worker_pipeline_error", None),
             "worker_collector_warning": getattr(s, "worker_collector_warning", None),
             "last_checked_at": _iso(s.last_checked_at),
-            "last_error": s.last_error,
+            "last_error_db": s.last_error,
+            "last_error_active": _display_last_error(s),
+            "worker_last_collector_failure_at": _iso(
+                getattr(s, "worker_last_collector_failure_at", None)
+            ),
+            "worker_last_collector_failure_message": getattr(
+                s, "worker_last_collector_failure_message", None
+            ),
             "backfill_complete": bool(getattr(s, "backfill_complete", True)),
             "counts": counts.model_dump(),
             "counts_scope": "last_completed_batch_steps_1_to_4",
@@ -84,7 +107,7 @@ def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
         listings_found_count=listings_n,
         alerts_sent_count=alerts_n,
         backfill_complete=bool(getattr(s, "backfill_complete", True)),
-        last_error=s.last_error,
+        last_error=_display_last_error(s),
         current_step=int(getattr(s, "worker_current_step", 0)),
         current_state=str(getattr(s, "worker_current_state", None) or "idle"),
         pipeline_message=pipeline_msg,
@@ -126,6 +149,8 @@ def run_monitoring(
     s.last_error = None
     s.worker_pipeline_error = None
     s.worker_collector_warning = None
+    s.worker_last_collector_failure_at = None
+    s.worker_last_collector_failure_message = None
     s.worker_current_step = 0
     s.worker_current_state = "starting"
     s.worker_pipeline_message = "Monitoring requested — waiting for worker to pick up."

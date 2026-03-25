@@ -220,7 +220,10 @@ class WorkerStatus(BaseModel):
     listings_found_count: int = 0
     alerts_sent_count: int = 0
     backfill_complete: bool = True
-    last_error: str | None = None
+    last_error: str | None = Field(
+        default=None,
+        description="Active fatal error only (e.g. while monitoring_state is error); stale DB values are hidden.",
+    )
     current_step: int = 0
     current_state: str = "idle"
     pipeline_message: str = ""
