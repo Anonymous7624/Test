@@ -1,8 +1,9 @@
 """
 Structured Step 1 search plans: Marketplace filters + focused product queries (no keyword blobs).
 
-Facebook Marketplace URLs are not officially documented; we use path + query params
-observed in the wild (maxPrice, sortBy, category path, search query).
+Step 1 uses a path-only Marketplace entry URL (category segment when set), then applies
+location, radius, price, and sort in the browser UI. Focused terms run via the search box —
+not via hand-built ``?maxPrice=...`` URLs.
 """
 
 from __future__ import annotations
@@ -57,8 +58,13 @@ FB_MARKETPLACE_CATEGORY_SLUG: dict[str, str | None] = {
     "vehicles": "vehicles",
 }
 
-# Default: newest first (good for monitoring). Stored as URL param value.
+# Default: newest first (good for monitoring). Internal key; UI shows a label (e.g. "Newest first").
 DEFAULT_MARKETPLACE_SORT = "creation_time_descend"
+
+# Map internal sort_mode -> English Marketplace UI label (logged-in web, en locale).
+MARKETPLACE_SORT_UI_LABEL: dict[str, str] = {
+    "creation_time_descend": "Newest first",
+}
 
 _MAX_FOCUS_QUERIES = 6
 _TOKEN_SPLIT_RE = re.compile(r"[\s,/]+")
@@ -116,6 +122,40 @@ def focused_queries_from_category_keywords(
             break
 
     return out
+
+
+class SearchPlanInvalidError(RuntimeError):
+    """Raised when a profile cannot produce a valid Step 1 search plan (no queries, no location, etc.)."""
+
+
+def build_marketplace_entry_url(plan: SearchPlan) -> str:
+    """
+    Path-only Marketplace entry URL (no filter query string).
+
+    Category context uses ``/marketplace/category/{slug}/`` when configured; otherwise ``/marketplace/``.
+    Filters (location, radius, price, sort) are applied in the browser UI — not via URL params.
+    """
+    base = "https://www.facebook.com"
+    if plan.marketplace_category_slug:
+        return f"{base}/marketplace/category/{plan.marketplace_category_slug}/"
+    return f"{base}/marketplace/"
+
+
+def validate_search_plan_for_step1(plan: SearchPlan) -> None:
+    """
+    Real Playwright collection requires a non-empty location and at least one focused query term.
+    Prevents blank searches and empty ``query=`` navigation.
+    """
+    if not (plan.location_text or "").strip():
+        raise SearchPlanInvalidError(
+            "Step 1 requires location_text to set Marketplace location/radius in the UI."
+        )
+    queries = [q.strip() for q in plan.focused_queries if q and str(q).strip()]
+    if not queries:
+        raise SearchPlanInvalidError(
+            "Step 1 requires at least one focused product query term (from category keywords). "
+            "Add keywords in config/categories.json or choose a category with keywords."
+        )
 
 
 @dataclass

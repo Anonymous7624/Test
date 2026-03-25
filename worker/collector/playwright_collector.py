@@ -5,7 +5,8 @@ Uses ``storage_state`` from ``backend/playwright/.auth/facebook.json`` (see
 ``facebook_login_bootstrap.py`` at repo root).
 
 Modes:
-- Default: navigate to Marketplace search (real listings).
+- Default: navigate to Marketplace (path-only entry URL), apply filters in the UI, then run
+  focused product queries in the search box (no weak ``?maxPrice=...``-only URLs).
 - ``COLLECTOR_USE_LOCAL_STUB=1``: load local HTML (``COLLECTOR_STUB_HTML`` or bundled stub)
   for offline/CI — same DOM as before.
 """
@@ -16,12 +17,17 @@ import logging
 import os
 import re
 from pathlib import Path
-from urllib.parse import urlencode
 
 from mock_scraper import RawListing
 
 from search_context import CollectionInputs
-from search_plan import SearchPlan
+from search_plan import SearchPlanInvalidError, validate_search_plan_for_step1
+
+from .marketplace_ui import (
+    MarketplaceFilterError,
+    apply_marketplace_filters_ui,
+    run_focused_marketplace_query,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,41 +67,6 @@ def _parse_float(val: str | None) -> float | None:
         return float(val)
     except ValueError:
         return None
-
-
-def build_marketplace_search_url(plan: SearchPlan, query: str) -> str:
-    """
-    Facebook Marketplace URL with filters on the query string and product terms only in ``query``.
-
-    Category is expressed via path when ``plan.marketplace_category_slug`` is set; otherwise
-    ``/marketplace/search/``. Location is not stuffed into ``query`` (session / saved UI
-    location applies). Radius is not passed as a URL param (not stable in this flow).
-    """
-    max_p = int(max(0, min(plan.max_price, 1_000_000)))
-    params: list[tuple[str, str]] = []
-    q = (query or "").strip()
-    if q:
-        params.append(("query", q))
-    params.append(("maxPrice", str(max_p)))
-    params.append(("sortBy", plan.sort_mode))
-    params.append(("exact", "false"))
-    base = "https://www.facebook.com"
-    if plan.marketplace_category_slug:
-        path = f"{base}/marketplace/category/{plan.marketplace_category_slug}/"
-    else:
-        path = f"{base}/marketplace/search/"
-    return f"{path}?{urlencode(params)}"
-
-
-def _marketplace_filters_for_log(plan: SearchPlan) -> dict[str, object]:
-    return {
-        "max_price": int(max(0, min(plan.max_price, 1_000_000))),
-        "sort_by": plan.sort_mode,
-        "exact": False,
-        "category_path": plan.marketplace_category_slug,
-        "location_text": plan.location_text,
-        "radius_miles": round(plan.radius_miles, 2),
-    }
 
 
 def _normalize_fb_url(href: str) -> str:
@@ -264,8 +235,7 @@ async def fetch_listings_playwright(
     backfill: bool,
 ) -> list[RawListing]:
     """
-    Collect listings: real Marketplace search by default, or local stub HTML if
-    ``COLLECTOR_USE_LOCAL_STUB=1``.
+    Collect listings: real Marketplace via UI filters + focused queries by default, or local stub.
     """
     try:
         from playwright.async_api import async_playwright
@@ -300,16 +270,22 @@ async def fetch_listings_playwright(
         collection_inputs.user_id,
     )
     logger.info(
-        "Search plan (structured) user_id=%s: %s",
+        "Step 1 search plan (exact) user_id=%s: %s",
         plan.user_id,
         plan.to_log_dict(),
     )
-    logger.info(
-        "Built-in filters (Marketplace URL) user_id=%s: %s",
-        plan.user_id,
-        _marketplace_filters_for_log(plan),
-    )
-    logger.info("Facebook auth state loaded from %s", auth_path)
+
+    if not use_stub:
+        try:
+            validate_search_plan_for_step1(plan)
+        except SearchPlanInvalidError:
+            logger.exception("Invalid search plan for Step 1 (user_id=%s)", plan.user_id)
+            raise
+        logger.info(
+            "Step 1 strategy user_id=%s: path-only Marketplace entry + UI filters (location, radius, "
+            "max price, sort) then focused search-box queries — no ?maxPrice= / ?sortBy= URL filter strings.",
+            plan.user_id,
+        )
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
@@ -320,7 +296,7 @@ async def fetch_listings_playwright(
                 page.set_default_timeout(60_000)
 
                 if use_stub:
-                    logger.info("Search target: local stub file %s", stub_path)
+                    logger.info("Search target: local stub file %s (no Marketplace URL)", stub_path)
                     out = await _parse_stub_page(
                         page,
                         collection_inputs=collection_inputs,
@@ -328,25 +304,50 @@ async def fetch_listings_playwright(
                         stub_path=stub_path,
                     )
                 else:
-                    queries = plan.focused_queries or [""]
+                    queries = [q.strip() for q in plan.focused_queries if q and str(q).strip()]
                     n_q = len(queries)
                     total_cap = 50 if backfill else 15
                     per_cap = max(1, (total_cap + n_q - 1) // n_q)
                     merged: list[RawListing] = []
                     seen_keys: set[str] = set()
+
+                    ui_applied: dict = {}
+                    try:
+                        ui_applied = await apply_marketplace_filters_ui(
+                            page,
+                            plan,
+                            collection_inputs=collection_inputs,
+                        )
+                    except MarketplaceFilterError:
+                        logger.exception(
+                            "Marketplace UI filters failed user_id=%s (see exception)",
+                            plan.user_id,
+                        )
+                        raise
+                    logger.info(
+                        "Step 1 UI filters applied (summary) user_id=%s: %s",
+                        plan.user_id,
+                        ui_applied,
+                    )
+
                     for idx, fq in enumerate(queries):
-                        url = build_marketplace_search_url(plan, fq)
-                        q_for_log = fq.strip() if fq.strip() else None
                         logger.info(
-                            "Marketplace run %s/%s user_id=%s focused_query=%r per_search_cap=%s url=%s",
+                            "Step 1 focused query %s/%s user_id=%s term=%r per_search_cap=%s",
                             idx + 1,
                             n_q,
                             plan.user_id,
-                            q_for_log,
+                            fq,
                             per_cap,
-                            url,
                         )
-                        await page.goto(url, wait_until="domcontentloaded")
+                        try:
+                            await run_focused_marketplace_query(page, fq)
+                        except MarketplaceFilterError:
+                            logger.exception(
+                                "Focused query failed user_id=%s term=%r",
+                                plan.user_id,
+                                fq,
+                            )
+                            raise
                         batch = await _parse_facebook_marketplace_page(
                             page,
                             collection_inputs=collection_inputs,
@@ -354,10 +355,11 @@ async def fetch_listings_playwright(
                             max_items=per_cap,
                         )
                         logger.info(
-                            "Marketplace run %s/%s user_id=%s candidates_parsed=%s (dedupe before merge)",
+                            "Step 1 focused query %s/%s user_id=%s term=%r cards_collected=%s (pre-dedupe)",
                             idx + 1,
                             n_q,
                             plan.user_id,
+                            fq,
                             len(batch),
                         )
                         for r in batch:
@@ -379,7 +381,7 @@ async def fetch_listings_playwright(
                 if not use_stub and len(out) == 0:
                     logger.warning(
                         "No listings parsed from Marketplace HTML — check auth state, "
-                        "search results, or DOM changes."
+                        "UI filter selectors, search results, or DOM changes."
                     )
                 return out
             finally:

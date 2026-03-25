@@ -3,7 +3,7 @@
     {
       "id": "general",
       "label": "General",
-      "keywords": []
+      "keywords": ["bookshelf", "mirror", "lamp", "rug", "frame"]
     },
     {
       "id": "electronics",
