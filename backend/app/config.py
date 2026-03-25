@@ -59,7 +59,11 @@ class Settings(BaseSettings):
     # Ollama (local LLM for listing scoring; worker reads same env via backend settings)
     ollama_base_url: str = Field(default="http://127.0.0.1:11434", validation_alias="OLLAMA_BASE_URL")
     ollama_model: str = Field(default="llama3.2", validation_alias="OLLAMA_MODEL")
-    ollama_timeout: float = Field(default=180.0, validation_alias="OLLAMA_TIMEOUT")
+    # Step 3 HTTP budget for Ollama /api/chat (httpx). Prefer OLLAMA_TIMEOUT_SECONDS; OLLAMA_TIMEOUT is legacy.
+    ollama_timeout: float = Field(
+        default=240.0,
+        validation_alias=AliasChoices("OLLAMA_TIMEOUT_SECONDS", "OLLAMA_TIMEOUT"),
+    )
     # Added to baseline Ollama HTTP timeout for high-priority (strong / likely-profitable) candidates.
     ollama_timeout_strong_bonus: float = Field(
         default=30.0,

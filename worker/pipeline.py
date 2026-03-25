@@ -286,10 +286,19 @@ def process_batch(
     ai_cap = _env_int("WORKER_STEP3_AI_CAP", 50)
     strong_min_strength = _env_float("WORKER_OLLAMA_STRONG_MIN_STRENGTH", 0.72)
     strong_min_hprofit = _env_float("WORKER_OLLAMA_STRONG_MIN_HEURISTIC_PROFIT", 25.0)
-    base_timeout = float(settings.ollama_timeout or 180.0)
+    base_timeout = float(settings.ollama_timeout or 240.0)
     strong_bonus = float(getattr(settings, "ollama_timeout_strong_bonus", 30.0))
-    per_candidate_max = _env_float("WORKER_STEP3_AI_CANDIDATE_MAX_SECONDS", 300.0)
+    # Must be >= base_timeout + strong_bonus or HTTP budget is capped below Ollama settings.
+    per_candidate_max = _env_float("WORKER_STEP3_AI_CANDIDATE_MAX_SECONDS", 600.0)
     heartbeat_sec = _env_float("WORKER_STEP3_HEARTBEAT_SECONDS", 15.0)
+
+    logger.info(
+        "Step 3 Ollama timeout budget: base=%.1fs (OLLAMA_TIMEOUT_SECONDS/OLLAMA_TIMEOUT) "
+        "strong_bonus=%.1fs per_candidate_cap=%.1fs (WORKER_STEP3_AI_CANDIDATE_MAX_SECONDS)",
+        base_timeout,
+        strong_bonus,
+        per_candidate_max,
+    )
 
     if len(ai_jobs) > ai_cap:
         logger.warning(

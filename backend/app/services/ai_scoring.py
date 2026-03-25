@@ -188,16 +188,13 @@ def score_matched_candidate(
     """
     Score a single Step-2–approved candidate via Ollama. Does not raise on model/network errors.
 
-    ``timeout_seconds`` overrides the default ``OLLAMA_TIMEOUT`` for this request (e.g. stronger
-    candidates get a longer budget from the worker).
+    ``timeout_seconds`` overrides the default ``OLLAMA_TIMEOUT_SECONDS`` / ``OLLAMA_TIMEOUT`` for this
+    request (e.g. stronger candidates get a longer budget from the worker).
     """
     base = (settings.ollama_base_url or "").strip().rstrip("/")
     model = (settings.ollama_model or "llama3.2").strip()
-    timeout = float(
-        timeout_seconds
-        if timeout_seconds is not None
-        else (settings.ollama_timeout or 180.0)
-    )
+    default_timeout = float(settings.ollama_timeout or 240.0)
+    timeout = float(timeout_seconds if timeout_seconds is not None else default_timeout)
 
     if not base:
         fb, _ = _heuristic_fallback(inp)
@@ -243,6 +240,15 @@ def score_matched_candidate(
         "options": {"temperature": 0.15, "top_p": 0.9},
     }
 
+    title_hint = _trim(inp.title, 120)
+    logger.info(
+        "Ollama request starting url=%s model=%s timeout_seconds=%.1f title=%s",
+        url,
+        model,
+        timeout,
+        title_hint,
+    )
+
     try:
         with httpx.Client(timeout=timeout) as client:
             r = client.post(url, json=payload)
@@ -251,8 +257,30 @@ def score_matched_candidate(
                 r = client.post(url, json=loose)
             r.raise_for_status()
             data = r.json()
+    except httpx.TimeoutException as exc:
+        logger.warning(
+            "Ollama request timed out after %.1fs (configured timeout_seconds=%.1f) url=%s model=%s title=%s: %s",
+            timeout,
+            timeout,
+            url,
+            model,
+            title_hint,
+            exc,
+        )
+        return _failure_result(
+            inp=inp,
+            model=model,
+            error=f"timeout_after_{timeout}s:{exc}",
+            conservative_alert=False,
+        )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Ollama request failed: %s", exc)
+        logger.warning(
+            "Ollama request failed (timeout_seconds=%.1f url=%s model=%s): %s",
+            timeout,
+            url,
+            model,
+            exc,
+        )
         return _failure_result(
             inp=inp,
             model=model,
@@ -313,6 +341,14 @@ def score_matched_candidate(
 
     # Align should_alert with derived profit (resale − price).
     alert = raw_should_alert and ep > 0.0
+
+    logger.info(
+        "Ollama request succeeded timeout_seconds=%.1f model=%s title=%s estimated_profit=%.2f",
+        timeout,
+        model,
+        title_hint,
+        ep,
+    )
 
     ai_result = {
         "estimated_resale": er,
