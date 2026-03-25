@@ -2,14 +2,13 @@
 Facebook Marketplace: apply built-in filters via the logged-in web UI (Playwright async).
 
 Facebook changes markup frequently; selectors use roles/labels with fallbacks. Location and radius
-are required for a meaningful search. The Filters drawer (max price, sort) is best-effort: if it
-cannot be opened or controls fail, the collector degrades gracefully and continues with focused
-queries using whatever filters Facebook already applied (e.g. location/radius, category path).
+are required for a meaningful search. The Filters drawer (sort only; max price is Step 2) is
+best-effort: if it cannot be opened or controls fail, the collector continues with focused queries
+using location/radius and category path. Max price is never applied in Marketplace UI.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from typing import Any, Callable
@@ -21,7 +20,11 @@ from search_plan import (
     build_marketplace_entry_url,
 )
 
-from .marketplace_dom import marketplace_search_results_url, wait_for_any_item_link
+from .marketplace_dom import (
+    is_facebook_marketplace_url,
+    marketplace_search_results_url,
+    wait_for_any_item_link,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -317,40 +320,6 @@ async def _try_open_filters_drawer(page) -> dict[str, Any]:
     }
 
 
-async def _set_max_price_in_filters(page, plan: SearchPlan) -> None:
-    """Inside Filters: set maximum price (USD)."""
-    cap = int(max(0, min(plan.max_price, 1_000_000)))
-    dialog = page.locator('[role="dialog"]').first
-    try:
-        await dialog.wait_for(state="visible", timeout=12_000)
-    except Exception as exc:
-        raise MarketplaceFilterError("Filters panel not visible as a dialog.") from exc
-
-    # Prefer labeled "Max" near price.
-    max_input = None
-    for loc in (
-        dialog.get_by_label(re.compile(r"^max$", re.I)),
-        dialog.locator('input[placeholder*="Max" i]'),
-        dialog.locator('input[aria-label*="Max" i]'),
-        dialog.locator('input[inputmode="numeric"]').nth(1),
-    ):
-        try:
-            if await loc.count() < 1:
-                continue
-            el = loc.first
-            await el.wait_for(state="visible", timeout=8000)
-            max_input = el
-            break
-        except Exception:
-            continue
-    if max_input is None:
-        raise MarketplaceFilterError("Could not find Max price input in Filters.")
-
-    await max_input.fill("")
-    await max_input.fill(str(cap))
-    await asyncio.sleep(0.1)
-
-
 async def _set_sort_in_filters(page, plan: SearchPlan) -> None:
     label = _sort_label_for_plan(plan)
     dialog = page.locator('[role="dialog"]').first
@@ -393,6 +362,31 @@ async def _apply_filters_confirm(page) -> None:
         except Exception:
             continue
     raise MarketplaceFilterError("Could not confirm Filters (no Apply / See items button).")
+
+
+async def ensure_marketplace_context(page, *, expected_query: str) -> dict[str, Any]:
+    """
+    If navigation left Marketplace (e.g. global search), recover to canonical Marketplace search URL.
+    """
+    meta: dict[str, Any] = {
+        "recovered": False,
+        "url_before": page.url,
+        "url_after": page.url,
+    }
+    if is_facebook_marketplace_url(page.url):
+        return meta
+    direct = marketplace_search_results_url(expected_query)
+    logger.warning(
+        "Marketplace UI: page left Marketplace — recovering query=%r from url=%r to %r",
+        expected_query,
+        page.url,
+        direct,
+    )
+    await page.goto(direct, wait_until="domcontentloaded")
+    await page.wait_for_timeout(900)
+    meta["recovered"] = True
+    meta["url_after"] = page.url
+    return meta
 
 
 async def run_focused_marketplace_query(page, query: str) -> dict[str, Any]:
@@ -484,6 +478,7 @@ async def run_focused_marketplace_query(page, query: str) -> dict[str, Any]:
                     probe_name,
                     probe_count,
                 )
+                meta["marketplace_context"] = await ensure_marketplace_context(page, expected_query=q)
                 return meta
 
             # UI may have used header search or SPA did not update URL — try canonical search URL.
@@ -513,6 +508,7 @@ async def run_focused_marketplace_query(page, query: str) -> dict[str, Any]:
                 meta.get("page_title_after"),
                 meta["item_links_probe"],
             )
+            meta["marketplace_context"] = await ensure_marketplace_context(page, expected_query=q)
             return meta
         except Exception as exc:
             last_exc = exc
@@ -542,6 +538,7 @@ async def run_focused_marketplace_query(page, query: str) -> dict[str, Any]:
         page.url,
         meta["item_links_probe"],
     )
+    meta["marketplace_context"] = await ensure_marketplace_context(page, expected_query=q)
     return meta
 
 
@@ -552,7 +549,7 @@ async def apply_marketplace_filters_ui(
     collection_inputs: CollectionInputs,
 ) -> dict[str, Any]:
     """
-    Navigate to Marketplace (category path only), then set location, radius, max price, sort via UI.
+    Navigate to Marketplace (category path only), then set location, radius, and sort via UI.
 
     Category context: path-only ``/marketplace/category/{slug}/`` when ``plan.marketplace_category_slug`` is set; otherwise ``/marketplace/``.
     """
@@ -571,14 +568,13 @@ async def apply_marketplace_filters_ui(
         "location_text": (plan.location_text or "").strip(),
         "radius_miles_requested": round(plan.radius_miles, 2),
         "radius_miles_snapped": _snap_radius_miles(plan.radius_miles),
-        "max_price_cap": int(max(0, min(plan.max_price, 1_000_000))),
+        "max_price": "enforced_in_step2_only",
         "sort_mode": plan.sort_mode,
         "sort_ui_label": _sort_label_for_plan(plan),
         "location_radius_ok": False,
         "filters_drawer_opened": False,
         "filters_drawer_already_visible": False,
         "filters_drawer_selector": None,
-        "max_price_ui": "not_attempted",
         "sort_ui": "not_attempted",
         "filters_confirmed": False,
         "degraded_mode": False,
@@ -608,13 +604,12 @@ async def apply_marketplace_filters_ui(
 
     if not applied["filters_drawer_opened"]:
         applied["degraded_mode"] = True
-        applied["max_price_ui"] = "skipped_no_drawer"
         applied["sort_ui"] = "skipped_no_drawer"
         fs = drawer_info.get("failure_summary") or (
             "; ".join(drawer_info.get("attempt_log") or []) or "unknown"
         )
         applied["worker_collector_warning"] = (
-            "Advanced Marketplace filters (max price, sort) were skipped: Filters drawer did not open. "
+            "Marketplace sort filter was skipped: Filters drawer did not open. "
             f"Details: {fs[:400]}"
         )
         logger.warning(
@@ -623,26 +618,7 @@ async def apply_marketplace_filters_ui(
             applied["worker_collector_warning"][:500],
         )
     else:
-        # Max price
-        try:
-            await _set_max_price_in_filters(page, plan)
-            applied["max_price_ui"] = "applied"
-            logger.info(
-                "Marketplace UI: max price applied user_id=%s cap=%s",
-                plan.user_id,
-                applied["max_price_cap"],
-            )
-        except Exception as exc:
-            applied["max_price_ui"] = f"skipped: {type(exc).__name__}: {exc!r}"
-            applied["degraded_mode"] = True
-            logger.warning(
-                "Marketplace UI: max price not applied user_id=%s: %s",
-                plan.user_id,
-                exc,
-                exc_info=True,
-            )
-
-        # Sort
+        # Sort only (max price is Step 2)
         try:
             await _set_sort_in_filters(page, plan)
             applied["sort_ui"] = "applied"
@@ -672,8 +648,8 @@ async def apply_marketplace_filters_ui(
 
         if applied["degraded_mode"] and not applied.get("worker_collector_warning"):
             applied["worker_collector_warning"] = (
-                "Some advanced Marketplace filters could not be fully applied (max price, sort, and/or confirm). "
-                "Search uses location/radius and category; results may be broader than configured."
+                "Marketplace sort filter could not be fully applied (sort and/or confirm). "
+                "Search uses location/radius and category."
             )
             logger.warning(
                 "Marketplace UI: degraded mode user_id=%s — partial advanced filters",
@@ -682,12 +658,11 @@ async def apply_marketplace_filters_ui(
 
     logger.info(
         "Marketplace UI: filter cycle summary user_id=%s location_radius_ok=%s drawer_open=%s "
-        "degraded=%s max_price=%s sort=%s confirmed=%s",
+        "degraded=%s sort=%s confirmed=%s",
         plan.user_id,
         applied["location_radius_ok"],
         applied["filters_drawer_opened"],
         applied["degraded_mode"],
-        applied["max_price_ui"],
         applied["sort_ui"],
         applied["filters_confirmed"],
     )

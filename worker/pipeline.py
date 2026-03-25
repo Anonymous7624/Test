@@ -114,7 +114,7 @@ def process_batch(
             collection_inputs,
             origin_type=origin_type,
         )
-        ok, reason = prefilter_candidate(cand, max_price=collection_inputs.max_price)
+        ok, reason = prefilter_candidate(cand)
         if not ok:
             step1_prefilter_drop += 1
             if reason:
@@ -366,5 +366,37 @@ def process_batch(
         f"step2_reasons={dict(step2_reason_counter)} | "
         f"step3_scored={stats.step3_scored} step4_saved={stats.step4_saved} alerts_sent={stats.alerts_sent}",
         flush=True,
+    )
+
+    def _step2_rejection_bucket(reason: str) -> str:
+        if reason == "duplicate_user_source_url":
+            return "duplicate_detection"
+        if reason in ("invalid_price", "non_positive_price"):
+            return "bad_price"
+        if reason == "over_max_price":
+            return "price_too_high"
+        if reason == "location_outside_radius":
+            return "location_mismatch"
+        if reason in (
+            "category_keyword_mismatch",
+            "category_mismatch_no_keywords_configured",
+        ):
+            return "weak_keyword_or_category"
+        return "other"
+
+    bucket_counts: Counter[str] = Counter()
+    for r, n in step2_reason_counter.items():
+        bucket_counts[_step2_rejection_bucket(r)] += n
+    logger.info(
+        "Step 2 rejection buckets user_id=%s: duplicate_detection=%s bad_price=%s price_too_high=%s "
+        "location_mismatch=%s weak_keyword_or_category=%s other=%s (raw_reasons=%s)",
+        profile.user_id,
+        bucket_counts.get("duplicate_detection", 0),
+        bucket_counts.get("bad_price", 0),
+        bucket_counts.get("price_too_high", 0),
+        bucket_counts.get("location_mismatch", 0),
+        bucket_counts.get("weak_keyword_or_category", 0),
+        bucket_counts.get("other", 0),
+        dict(step2_reason_counter),
     )
     return stats

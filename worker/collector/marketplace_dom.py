@@ -50,6 +50,14 @@ def marketplace_search_results_url(query: str) -> str:
     return f"https://www.facebook.com/marketplace/search/?query={quote_plus(q)}"
 
 
+def is_facebook_marketplace_url(url: str) -> bool:
+    """True when URL is clearly inside Facebook Marketplace (not global FB search)."""
+    u = (url or "").lower()
+    if "facebook.com" not in u and "fb.com" not in u:
+        return False
+    return "/marketplace" in u
+
+
 def url_looks_like_marketplace_search(url: str) -> bool:
     u = (url or "").lower()
     if "facebook.com" not in u and "fb.com" not in u:

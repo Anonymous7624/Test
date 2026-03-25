@@ -31,10 +31,19 @@ from .marketplace_dom import (
 from .marketplace_ui import (
     MarketplaceFilterError,
     apply_marketplace_filters_ui,
+    ensure_marketplace_context,
     run_focused_marketplace_query,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)).strip())
+    except ValueError:
+        return default
+
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _FACEBOOK_AUTH_STATE = (
@@ -180,65 +189,37 @@ async def _parse_stub_page(
     return out
 
 
-async def _parse_facebook_marketplace_page(
+async def _harvest_visible_marketplace_cards(
     page,
-    *,
     collection_inputs: CollectionInputs,
-    backfill: bool,
+    *,
     max_items: int | None = None,
-    expected_query: str | None = None,
-    submission_meta: dict | None = None,
-) -> list[RawListing]:
-    """Parse search results: listing links and visible card text (price/title heuristics)."""
-    await page.wait_for_load_state("domcontentloaded")
-    probe_name, probe_n = await wait_for_any_item_link(page, timeout_ms=25_000)
-    if probe_name and probe_n:
-        logger.info(
-            "Marketplace parse: item links detected via wait probe selector=%s count=%s",
-            probe_name,
-            probe_n,
-        )
-
+) -> tuple[str, list[RawListing]]:
+    """Parse currently loaded result cards (no scroll). ``max_items`` caps harvest size when set."""
     strategy_name, links = await query_all_item_links_with_strategy(page)
     if not links:
-        reason = "selector_miss_or_empty_results"
-        if submission_meta and submission_meta.get("item_links_probe"):
-            ip = submission_meta["item_links_probe"]
-            if isinstance(ip, dict) and not ip.get("selector"):
-                reason = "probe_failed_after_submit"
-        await log_no_results_diagnostics(
-            page,
-            step_label="parse_facebook_marketplace_page",
-            expected_query=expected_query or "",
-            submission_meta={**(submission_meta or {}), "parse_reason": reason},
-        )
-        logger.warning(
-            "Marketplace parse: no listing anchors matched any strategy (tried ordered selectors)."
-        )
-        return []
-    logger.info(
-        "Marketplace parse: using selector strategy=%s link_count=%s",
+        return strategy_name, []
+    logger.debug(
+        "Marketplace harvest: strategy=%s link_count=%s",
         strategy_name,
         len(links),
     )
-    if max_items is None:
-        max_items = 50 if backfill else 15
-    seen: set[str] = set()
+    seen_href: set[str] = set()
     out: list[RawListing] = []
     cat = (collection_inputs.category_id or "general").strip()
     default_loc = (collection_inputs.primary_search_location or "Unknown").strip() or "Unknown"
 
     for link in links:
-        if len(out) >= max_items:
+        if max_items is not None and len(out) >= max_items:
             break
         href = await link.get_attribute("href")
         if not href:
             continue
         full = _normalize_fb_url(href)
         iid = _item_id_from_href(full)
-        if not iid or full in seen:
+        if not iid or full in seen_href:
             continue
-        seen.add(full)
+        seen_href.add(full)
         text = (await link.inner_text() or "").strip()
         price = _extract_price(text)
         title = _title_from_card_text(text)
@@ -259,13 +240,134 @@ async def _parse_facebook_marketplace_page(
         )
     if links and not out:
         logger.warning(
-            "Marketplace parse: %s item links matched selector=%s but none passed price/title heuristics "
-            "(card text may have changed). url=%r",
+            "Marketplace harvest: %s item links matched selector=%s but none passed price/title heuristics url=%r",
             len(links),
             strategy_name,
             page.url,
         )
-    return out
+    return strategy_name, out
+
+
+async def _collect_marketplace_feed_for_query(
+    page,
+    *,
+    collection_inputs: CollectionInputs,
+    expected_query: str,
+    submission_meta: dict | None,
+    per_query_cap: int,
+) -> tuple[list[RawListing], dict]:
+    """
+    Wait for results, harvest unique cards, scroll until idle or caps.
+
+    Stops when: per-query cap reached, ``WORKER_COLLECTOR_SCROLL_IDLE_ROUNDS`` consecutive scroll
+    rounds with no new unique cards, or ``WORKER_COLLECTOR_MAX_SCROLL_ROUNDS`` scroll rounds.
+    """
+    await page.wait_for_load_state("domcontentloaded")
+    probe_name, probe_n = await wait_for_any_item_link(page, timeout_ms=25_000)
+    if probe_name and probe_n:
+        logger.info(
+            "Marketplace parse: item links detected via wait probe selector=%s count=%s",
+            probe_name,
+            probe_n,
+        )
+
+    await ensure_marketplace_context(page, expected_query=expected_query)
+
+    max_scroll_rounds = _int_env("WORKER_COLLECTOR_MAX_SCROLL_ROUNDS", 25)
+    idle_limit = _int_env("WORKER_COLLECTOR_SCROLL_IDLE_ROUNDS", 3)
+    meta: dict = {
+        "scroll_rounds_executed": 0,
+        "stopped_reason": None,
+        "per_query_cap": per_query_cap,
+    }
+
+    out: list[RawListing] = []
+    seen: set[str] = set()
+    idle = 0
+    strategy_name = "none"
+
+    for round_idx in range(max_scroll_rounds):
+        await ensure_marketplace_context(page, expected_query=expected_query)
+        strategy_name, batch = await _harvest_visible_marketplace_cards(
+            page, collection_inputs, max_items=None
+        )
+
+        if round_idx == 0 and not batch:
+            reason = "selector_miss_or_empty_results"
+            if submission_meta and submission_meta.get("item_links_probe"):
+                ip = submission_meta["item_links_probe"]
+                if isinstance(ip, dict) and not ip.get("selector"):
+                    reason = "probe_failed_after_submit"
+            await log_no_results_diagnostics(
+                page,
+                step_label="collect_marketplace_feed_for_query",
+                expected_query=expected_query or "",
+                submission_meta={**(submission_meta or {}), "parse_reason": reason},
+            )
+            logger.warning(
+                "Marketplace collect: no harvestable cards on first pass strategy=%s query=%r",
+                strategy_name,
+                expected_query,
+            )
+
+        new_this = 0
+        for r in batch:
+            dk = _raw_dedupe_key(r)
+            if dk in seen:
+                continue
+            seen.add(dk)
+            out.append(r)
+            new_this += 1
+            if len(out) >= per_query_cap:
+                break
+
+        if round_idx == 0:
+            logger.info(
+                "Step 1 query=%r cards_seen_before_scroll=%s (unique candidates)",
+                expected_query,
+                len(out),
+            )
+        else:
+            logger.info(
+                "Step 1 query=%r scroll_round=%s cards_seen_cumulative=%s new_this_round=%s strategy=%s",
+                expected_query,
+                round_idx,
+                len(out),
+                new_this,
+                strategy_name,
+            )
+        meta["scroll_rounds_executed"] = round_idx
+
+        if len(out) >= per_query_cap:
+            meta["stopped_reason"] = "per_query_cap"
+            break
+
+        if round_idx >= 1 and new_this == 0:
+            idle += 1
+            if idle >= idle_limit:
+                meta["stopped_reason"] = "no_new_cards_after_scroll"
+                break
+        elif new_this > 0:
+            idle = 0
+
+        if round_idx >= max_scroll_rounds - 1:
+            meta["stopped_reason"] = meta.get("stopped_reason") or "max_scroll_rounds"
+            break
+
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(1300)
+
+    if not meta.get("stopped_reason"):
+        meta["stopped_reason"] = "completed_scroll_loop"
+
+    logger.info(
+        "Step 1 query=%r final_candidates_collected=%s stop_reason=%s strategy=%s",
+        expected_query,
+        len(out),
+        meta.get("stopped_reason"),
+        strategy_name,
+    )
+    return out, meta
 
 
 async def fetch_listings_playwright(
@@ -325,7 +427,7 @@ async def fetch_listings_playwright(
             raise
         logger.info(
             "Step 1 strategy user_id=%s: path-only Marketplace entry + UI filters (location, radius, "
-            "max price, sort) then focused search-box queries — no ?maxPrice= / ?sortBy= URL filter strings.",
+            "sort) then focused search-box queries — max price is Step 2 only; no ?maxPrice= URL params.",
             plan.user_id,
         )
 
@@ -354,8 +456,10 @@ async def fetch_listings_playwright(
                 else:
                     queries = [q.strip() for q in plan.focused_queries if q and str(q).strip()]
                     n_q = len(queries)
-                    total_cap = 50 if backfill else 15
-                    per_cap = max(1, (total_cap + n_q - 1) // n_q)
+                    total_cap = _int_env(
+                        "WORKER_COLLECTOR_BATCH_CAP", 600 if backfill else 400
+                    )
+                    per_query_cap = _int_env("WORKER_COLLECTOR_PER_QUERY_CAP", 100)
                     merged: list[RawListing] = []
                     seen_keys: set[str] = set()
 
@@ -386,12 +490,13 @@ async def fetch_listings_playwright(
 
                     for idx, fq in enumerate(queries):
                         logger.info(
-                            "Step 1 focused query %s/%s user_id=%s term=%r per_search_cap=%s",
+                            "Step 1 focused query %s/%s user_id=%s term=%r per_query_cap=%s batch_cap=%s",
                             idx + 1,
                             n_q,
                             plan.user_id,
                             fq,
-                            per_cap,
+                            per_query_cap,
+                            total_cap,
                         )
                         try:
                             sub_meta = await run_focused_marketplace_query(page, fq)
@@ -408,30 +513,49 @@ async def fetch_listings_playwright(
                                 fq,
                             )
                             raise
-                        batch = await _parse_facebook_marketplace_page(
+                        batch, scroll_meta = await _collect_marketplace_feed_for_query(
                             page,
                             collection_inputs=collection_inputs,
-                            backfill=backfill,
-                            max_items=per_cap,
                             expected_query=fq,
                             submission_meta=sub_meta,
+                            per_query_cap=per_query_cap,
                         )
                         logger.info(
-                            "Step 1 focused query %s/%s user_id=%s term=%r cards_collected=%s (pre-dedupe)",
+                            "Step 1 focused query %s/%s user_id=%s term=%r scroll_meta=%s",
                             idx + 1,
                             n_q,
                             plan.user_id,
                             fq,
-                            len(batch),
+                            scroll_meta,
                         )
+                        cross_query_dedupe = 0
+                        added = 0
                         for r in batch:
                             dk = _raw_dedupe_key(r)
                             if dk in seen_keys:
+                                cross_query_dedupe += 1
                                 continue
                             seen_keys.add(dk)
                             merged.append(r)
+                            added += 1
                             if len(merged) >= total_cap:
                                 break
+                        if cross_query_dedupe:
+                            logger.info(
+                                "Step 1 cross-query dedupe skipped user_id=%s term=%r count=%s",
+                                plan.user_id,
+                                fq,
+                                cross_query_dedupe,
+                            )
+                        logger.info(
+                            "Step 1 focused query %s/%s user_id=%s term=%r new_unique_added=%s merged_total=%s",
+                            idx + 1,
+                            n_q,
+                            plan.user_id,
+                            fq,
+                            added,
+                            len(merged),
+                        )
                         if len(merged) >= total_cap:
                             break
                     out = merged[:total_cap]

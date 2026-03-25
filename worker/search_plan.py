@@ -2,8 +2,8 @@
 Structured Step 1 search plans: Marketplace filters + focused product queries (no keyword blobs).
 
 Step 1 uses a path-only Marketplace entry URL (category segment when set), then applies
-location, radius, price, and sort in the browser UI. Focused terms run via the search box —
-not via hand-built ``?maxPrice=...`` URLs.
+location, radius, and sort in the browser UI. Focused terms run via the search box —
+not via hand-built ``?maxPrice=...`` URLs. Profile max price is applied in Step 2 only.
 """
 
 from __future__ import annotations
@@ -11,9 +11,11 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.domain import UserSettings as UserSettingsRow
 from app.services.categories_service import keywords_for_category
+from app.services.general_profitable_pack import select_general_search_queries_for_cycle
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +138,8 @@ def build_marketplace_entry_url(plan: SearchPlan) -> str:
     Path-only Marketplace entry URL (no filter query string).
 
     Category context uses ``/marketplace/category/{slug}/`` when configured; otherwise ``/marketplace/``.
-    Filters (location, radius, price, sort) are applied in the browser UI — not via URL params.
+    Filters (location, radius, sort) are applied in the browser UI — not via URL params.
+    Max price is enforced in Step 2, not in Marketplace UI.
     """
     base = "https://www.facebook.com"
     if plan.marketplace_category_slug:
@@ -174,9 +177,10 @@ class SearchPlan:
     marketplace_category_slug: str | None
     focused_queries: list[str]
     raw_category_keywords: list[str] = field(default_factory=list)
+    general_pack_meta: dict[str, Any] = field(default_factory=dict)
 
     def to_log_dict(self) -> dict:
-        return {
+        d = {
             "user_id": self.user_id,
             "category_id": self.category_id,
             "location_text": self.location_text,
@@ -187,12 +191,28 @@ class SearchPlan:
             "focused_queries": list(self.focused_queries),
             "raw_category_keywords": list(self.raw_category_keywords),
         }
+        if self.general_pack_meta:
+            d["general_profitable_pack"] = dict(self.general_pack_meta)
+        return d
 
 
 def build_search_plan(profile: UserSettingsRow) -> SearchPlan:
     cid = str(profile.category_id or "").strip() or "general"
     raw_kws = keywords_for_category(cid)
-    focused = focused_queries_from_category_keywords(cid, raw_kws)
+    general_pack_meta: dict = {}
+    if cid == "general":
+        focused, general_pack_meta = select_general_search_queries_for_cycle(
+            user_id=int(profile.user_id)
+        )
+        if not focused:
+            focused = focused_queries_from_category_keywords(cid, raw_kws)
+            logger.warning(
+                "Step 1 general pack empty; fallback to categories.json keyword queries user_id=%s focused=%s",
+                int(profile.user_id),
+                list(focused),
+            )
+    else:
+        focused = focused_queries_from_category_keywords(cid, raw_kws)
     logger.info(
         "Step 1 search keywords user_id=%s category_id=%s raw_category_keywords=%s focused_queries=%s",
         int(profile.user_id),
@@ -213,4 +233,5 @@ def build_search_plan(profile: UserSettingsRow) -> SearchPlan:
         marketplace_category_slug=slug,
         focused_queries=focused,
         raw_category_keywords=list(raw_kws),
+        general_pack_meta=general_pack_meta,
     )

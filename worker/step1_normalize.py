@@ -32,7 +32,7 @@ def normalize_raw_to_candidate(
     meta = {
         "collector_category_slug": raw.category_slug,
         "profile_category_id": str(profile.category_id or "").strip(),
-        "prefilter_max_price": float(profile.max_price),
+        "profile_max_price_step2": float(profile.max_price),
         "collection": {
             "category_id": collection_inputs.category_id,
             "keywords": list(collection_inputs.keywords),
@@ -63,14 +63,11 @@ def normalize_raw_to_candidate(
     )
 
 
-def prefilter_candidate(
-    candidate: CandidateListing,
-    *,
-    max_price: float,
-) -> tuple[bool, str | None]:
+def prefilter_candidate(candidate: CandidateListing) -> tuple[bool, str | None]:
     """
-    Light drops before Step 2: invalid rows, missing critical fields, obvious price violations.
-    Returns (keep, reason_code_or_none).
+    Light drops before Step 2: invalid rows, missing critical fields, non-numeric/non-positive price.
+
+    Profile max price is enforced in Step 2 only.
     """
     if not candidate.source_url.strip():
         return False, "missing_source_url"
@@ -85,7 +82,5 @@ def prefilter_candidate(
         return False, "invalid_price"
     if p <= 0:
         return False, "non_positive_price"
-    if p > float(max_price) + 1e-6:
-        return False, "over_max_price_prefilter"
 
     return True, None

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from pymongo.database import Database
 
 from app.domain import UserSettings as UserSettingsRow
@@ -54,9 +56,11 @@ def strict_match(
     profile: UserSettingsRow,
     db: Database,
 ) -> MatchResult:
-    """Evaluate one candidate against the monitoring profile; Mongo dedupe is part of Step 2."""
-    reasons: list[str] = []
+    """
+    Evaluate one candidate in order: Mongo dedupe → price validity → geo → keywords → max price.
 
+    Rejection reason codes are logged in aggregate by the pipeline (bad price, duplicate, etc.).
+    """
     repo = ListingRepository(db)
     if repo.find_by_user_source_url(profile.user_id, candidate.source_url):
         return MatchResult(
@@ -66,22 +70,26 @@ def strict_match(
             candidate_for_ai=None,
         )
 
-    if float(candidate.price) > float(profile.max_price) + 1e-6:
-        reasons.append("over_max_price")
+    p = float(candidate.price)
+    if math.isnan(p) or math.isinf(p):
+        return MatchResult(
+            matched=False,
+            rejection_reasons=["invalid_price"],
+            matched_keywords=[],
+            candidate_for_ai=None,
+        )
+    if p <= 0:
+        return MatchResult(
+            matched=False,
+            rejection_reasons=["non_positive_price"],
+            matched_keywords=[],
+            candidate_for_ai=None,
+        )
 
-    ok_cat, cat_reasons, matched_kw = category_and_keyword_ok(
-        category_slug=candidate.category_slug,
-        profile_category_id=str(profile.category_id or ""),
-        title=candidate.title,
-    )
-    if not ok_cat:
-        reasons.extend(cat_reasons)
-
-    # Geo: reuse listing_within_user_radius (expects RawListing-like fields)
     raw_like = RawListing(
         title=candidate.title,
         price=candidate.price,
-        location=candidate.location_text,
+        location=candidate.location,
         category_slug=candidate.category_slug,
         source_link=candidate.source_link,
         source=candidate.source,
@@ -98,12 +106,30 @@ def strict_match(
         listing_lon=raw_like.longitude,
         listing_location_text=raw_like.location,
     ):
-        reasons.append("location_outside_radius")
-
-    if reasons:
         return MatchResult(
             matched=False,
-            rejection_reasons=reasons,
+            rejection_reasons=["location_outside_radius"],
+            matched_keywords=[],
+            candidate_for_ai=None,
+        )
+
+    ok_cat, cat_reasons, matched_kw = category_and_keyword_ok(
+        category_slug=candidate.category_slug,
+        profile_category_id=str(profile.category_id or ""),
+        title=candidate.title,
+    )
+    if not ok_cat:
+        return MatchResult(
+            matched=False,
+            rejection_reasons=cat_reasons,
+            matched_keywords=matched_kw,
+            candidate_for_ai=None,
+        )
+
+    if p > float(profile.max_price) + 1e-6:
+        return MatchResult(
+            matched=False,
+            rejection_reasons=["over_max_price"],
             matched_keywords=matched_kw,
             candidate_for_ai=None,
         )
