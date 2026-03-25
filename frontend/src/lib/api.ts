@@ -53,6 +53,7 @@ export type UserSettings = {
   last_error: string | null;
   backfill_complete: boolean;
   telegram_verify_pending: boolean;
+  telegram_alert_mode: "any_listing" | "profitable_only" | "none";
 };
 
 export type ListingRow = {
@@ -67,6 +68,7 @@ export type ListingRow = {
   found_at: string;
   alert_status: string;
   source_link: string;
+  source_url?: string | null;
   source: string;
   discovery_source: string;
   origin_type: string;

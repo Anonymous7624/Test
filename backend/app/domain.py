@@ -30,6 +30,8 @@ class UserSettings:
     telegram_connected: bool
     telegram_verify_code: str | None
     telegram_verify_expires_at: datetime | None
+    # After Telegram is linked: any_listing | profitable_only | none (default applied in repo migration)
+    telegram_alert_mode: str
     monitoring_enabled: bool
     monitoring_state: str
     last_checked_at: datetime | None

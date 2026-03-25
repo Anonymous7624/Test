@@ -13,6 +13,9 @@ MAX_CUSTOM_KEYWORDS = 15
 SearchMode = Literal["marketplace_category", "custom_keywords"]
 SEARCH_MODES: frozenset[str] = frozenset({"marketplace_category", "custom_keywords"})
 
+TelegramAlertMode = Literal["any_listing", "profitable_only", "none"]
+TELEGRAM_ALERT_MODES: frozenset[str] = frozenset({"any_listing", "profitable_only", "none"})
+
 _WS_RE = re.compile(r"\s+")
 
 
@@ -44,6 +47,13 @@ def normalize_search_mode(raw: str | None) -> SearchMode:
     if s in SEARCH_MODES:
         return s  # type: ignore[return-value]
     return "marketplace_category"
+
+
+def normalize_telegram_alert_mode(raw: str | None) -> TelegramAlertMode:
+    s = (raw or "").strip().lower()
+    if s in TELEGRAM_ALERT_MODES:
+        return s  # type: ignore[return-value]
+    return "profitable_only"
 
 
 def migrate_settings_doc(doc: dict[str, Any]) -> dict[str, Any]:
@@ -88,6 +98,8 @@ def migrate_settings_doc(doc: dict[str, Any]) -> dict[str, Any]:
 
     # custom keywords
     d["custom_keywords"] = normalize_custom_keywords(d.get("custom_keywords"))
+
+    d["telegram_alert_mode"] = normalize_telegram_alert_mode(str(d.get("telegram_alert_mode")))
 
     return d
 

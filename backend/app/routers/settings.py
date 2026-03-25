@@ -25,7 +25,11 @@ from app.services.monitoring_validation import (
     settings_update_locked,
     validate_radius_miles,
 )
-from app.services.search_settings import normalize_custom_keywords, validate_settings_for_save
+from app.services.search_settings import (
+    normalize_custom_keywords,
+    normalize_telegram_alert_mode,
+    validate_settings_for_save,
+)
 from app.services.telegram_service import send_test_message
 from app.services.units import km_to_miles, miles_to_km
 
@@ -150,6 +154,8 @@ def update_my_settings(
         row.marketplace_category_label = label_for_slug(slug) or slug
     if "telegram_chat_id" in data:
         row.telegram_connected = bool((data.get("telegram_chat_id") or "").strip())
+    if "telegram_alert_mode" in data and data.get("telegram_alert_mode") is not None:
+        row.telegram_alert_mode = normalize_telegram_alert_mode(str(data["telegram_alert_mode"]))
     try:
         validate_settings_for_save(
             search_mode=row.search_mode,

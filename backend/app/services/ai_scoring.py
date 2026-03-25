@@ -186,7 +186,7 @@ def score_matched_candidate(inp: MatchedCandidateInput) -> Step3ScoreResult:
     """
     base = (settings.ollama_base_url or "").strip().rstrip("/")
     model = (settings.ollama_model or "llama3.2").strip()
-    timeout = float(settings.ollama_timeout or 120.0)
+    timeout = float(settings.ollama_timeout or 180.0)
 
     if not base:
         fb, _ = _heuristic_fallback(inp)
@@ -202,7 +202,7 @@ def score_matched_candidate(inp: MatchedCandidateInput) -> Step3ScoreResult:
         )
 
     system = (
-        "You are a conservative used-goods resale analyst. "
+        "You are a conservative resale analyst for second-hand marketplace listings. "
         "Estimate realistic resale and profit; avoid hype. "
         "Prefer under-stating resale over over-stating. "
         "Set should_alert to true only when profit is clearly positive after fees and risk. "
@@ -213,6 +213,8 @@ def score_matched_candidate(inp: MatchedCandidateInput) -> Step3ScoreResult:
         "listing": _build_prompt_payload(inp),
         "rules": [
             "USD only.",
+            "Default assumption: the item is USED / pre-owned unless the title or description clearly says it is new, "
+            "open-box, sealed, BNIB, NIB, or otherwise unused. Only treat it as new-like when that is explicit in the text.",
             "Assume typical marketplace fees/shipping risk unless description says otherwise.",
             "If data is thin, lower confidence and avoid should_alert.",
         ],

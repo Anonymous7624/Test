@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.domain import Listing, UserSettings as UserSettingsRow
 from app.services.marketplace_categories_service import label_for_slug
+from app.services.search_settings import normalize_telegram_alert_mode
 
 
 class Token(BaseModel):
@@ -57,6 +58,7 @@ class UserSettingsOut(BaseModel):
     geoapify_place_id: str | None = None
     boundary_context: dict[str, Any] | None = None
     telegram_verify_pending: bool = False
+    telegram_alert_mode: Literal["any_listing", "profitable_only", "none"] = "profitable_only"
 
 
 def user_settings_out_from_row(row: UserSettingsRow) -> UserSettingsOut:
@@ -96,6 +98,7 @@ def user_settings_out_from_row(row: UserSettingsRow) -> UserSettingsOut:
         geoapify_place_id=row.geoapify_place_id,
         boundary_context=row.boundary_context,
         telegram_verify_pending=pending,
+        telegram_alert_mode=normalize_telegram_alert_mode(str(getattr(row, "telegram_alert_mode", None))),
     )
 
 
@@ -111,6 +114,7 @@ class UserSettingsUpdate(BaseModel):
     custom_keywords: list[str] | None = None
     telegram_chat_id: str | None = None
     geoapify_place_id: str | None = None
+    telegram_alert_mode: Literal["any_listing", "profitable_only", "none"] | None = None
 
 
 class TelegramTestResult(BaseModel):
@@ -130,6 +134,7 @@ class ListingOut(BaseModel):
     found_at: datetime
     alert_status: str
     source_link: str
+    source_url: str | None = None
     source: str
     discovery_source: str
     profitable: bool
@@ -166,6 +171,7 @@ class ListingOut(BaseModel):
             found_at=row.found_at,
             alert_status=row.alert_status,
             source_link=row.source_link,
+            source_url=(getattr(row, "source_url", None) or row.source_link or None),
             source=row.source,
             discovery_source=getattr(row, "discovery_source", row.origin_type),
             profitable=row.profitable,

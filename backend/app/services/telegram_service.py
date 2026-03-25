@@ -54,15 +54,79 @@ def send_verification_success(chat_id: str) -> None:
     )
 
 
-def send_profit_alert(
+def _na_money(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        return f"${float(value):.2f}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _na_text(value: str | None, *, max_len: int = 320) -> str:
+    t = (value or "").strip()
+    if not t:
+        return "N/A"
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1].rstrip() + "…"
+
+
+def _fmt_confidence(raw: str | float | int | None) -> str:
+    if raw is None:
+        return "N/A"
+    if isinstance(raw, (int, float)):
+        x = float(raw)
+        if 0.0 <= x <= 1.0:
+            return f"{x:.0%}"
+        return f"{x:.2f}"
+    s = str(raw).strip()
+    return s if s else "N/A"
+
+
+def build_listing_alert_text(
+    *,
+    title: str,
+    price: float | None,
+    estimated_resale: float | None,
+    estimated_profit: float | None,
+    location_text: str | None,
+    description: str | None,
+    source_url: str,
+    confidence: str | float | int | None,
+) -> str:
+    """Deterministic Telegram body — no LLM text."""
+    lines = [
+        "Listing alert",
+        f"Title: {_na_text(title, max_len=500)}",
+        f"Price: {_na_money(price)}",
+        f"Est. retail: {_na_money(estimated_resale)}",
+        f"Est. profit: {_na_money(estimated_profit)}",
+        f"Location: {_na_text(location_text, max_len=240)}",
+        f"Confidence: {_fmt_confidence(confidence)}",
+        f"Description: {_na_text(description, max_len=280)}",
+        f"URL: {(source_url or '').strip() or 'N/A'}",
+    ]
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3997] + "…"
+    return text
+
+
+def send_listing_alert(
     *,
     chat_id: str | None,
     title: str,
-    source_link: str,
-    estimated_profit: float,
+    price: float | None,
+    estimated_resale: float | None,
+    estimated_profit: float | None,
+    location_text: str | None,
+    description: str | None,
+    source_url: str,
+    confidence: str | float | int | None,
 ) -> tuple[bool, str | None]:
     """
-    Sends alert to the given user's chat (multi-user: always pass that user's chat_id).
+    Sends a deterministic template alert to the user's Telegram chat.
     Returns (success, error_message_if_failed).
     """
     token = _bot_token()
@@ -70,8 +134,15 @@ def send_profit_alert(
         return False, "telegram_bot_token_not_configured"
     if not chat_id or not str(chat_id).strip():
         return False, "telegram_chat_not_configured"
-    text = (
-        f"Profit alert\n{title}\nEst. profit: {estimated_profit:.2f}\n{source_link}"
+    text = build_listing_alert_text(
+        title=title,
+        price=price,
+        estimated_resale=estimated_resale,
+        estimated_profit=estimated_profit,
+        location_text=location_text,
+        description=description,
+        source_url=source_url,
+        confidence=confidence,
     )
     return _send_message(token, str(chat_id).strip(), text)
 

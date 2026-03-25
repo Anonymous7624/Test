@@ -34,6 +34,7 @@ function editableSnapshot(s: UserSettings): string {
     marketplace_category_slug: s.marketplace_category_slug,
     custom_keywords: s.custom_keywords,
     telegram_chat_id: s.telegram_chat_id ?? null,
+    telegram_alert_mode: s.telegram_alert_mode,
   });
 }
 
@@ -708,6 +709,29 @@ export default function SettingsPage() {
                 Changes save automatically. If set, Run treats Telegram as configured without the /start code flow.
               </p>
             </div>
+            {settings.telegram_connected ? (
+              <div className="mt-4 rounded-lg border border-zinc-800 bg-zinc-900/30 px-3 py-3">
+                <label className="block text-xs font-medium text-zinc-300">Telegram alert mode</label>
+                <p className="mt-1 text-[11px] text-zinc-500">
+                  Controls which saved listings trigger a Telegram message (templates are fixed; not AI-written).
+                </p>
+                <select
+                  className="mt-2 w-full max-w-md rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 disabled:cursor-not-allowed"
+                  disabled={settingsLocked}
+                  value={settings.telegram_alert_mode}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      telegram_alert_mode: e.target.value as UserSettings["telegram_alert_mode"],
+                    })
+                  }
+                >
+                  <option value="any_listing">Every matched listing</option>
+                  <option value="profitable_only">Profitable listings only</option>
+                  <option value="none">None (no Telegram alerts)</option>
+                </select>
+              </div>
+            ) : null}
             <div className="mt-3 flex flex-wrap gap-2">
               <button
                 type="button"

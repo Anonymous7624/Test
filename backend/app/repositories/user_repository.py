@@ -6,7 +6,7 @@ from pymongo.database import Database
 from app.domain import User, UserSettings as UserSettingsState
 from app.models import UserRole
 from app.mongodb import next_sequence
-from app.services.search_settings import migrate_settings_doc
+from app.services.search_settings import migrate_settings_doc, normalize_telegram_alert_mode
 
 
 def _default_settings_doc(user_id: int) -> dict:
@@ -26,6 +26,7 @@ def _default_settings_doc(user_id: int) -> dict:
         "telegram_connected": False,
         "telegram_verify_code": None,
         "telegram_verify_expires_at": None,
+        "telegram_alert_mode": "profitable_only",
         "monitoring_enabled": False,
         "monitoring_state": "idle",
         "last_checked_at": None,
@@ -78,6 +79,7 @@ def settings_from_doc(doc: dict) -> UserSettingsState:
         telegram_connected=bool(d.get("telegram_connected", False)),
         telegram_verify_code=d.get("telegram_verify_code"),
         telegram_verify_expires_at=d.get("telegram_verify_expires_at"),
+        telegram_alert_mode=normalize_telegram_alert_mode(str(d.get("telegram_alert_mode"))),
         monitoring_enabled=bool(d.get("monitoring_enabled", False)),
         monitoring_state=str(d.get("monitoring_state") or "idle"),
         last_checked_at=d.get("last_checked_at"),

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/context/auth-context";
+import { ListingDetailModal } from "@/components/listing-detail-modal";
 import { fetchListings, workerStatus, type ListingRow, type WorkerStatusPayload } from "@/lib/api";
 import Link from "next/link";
 
@@ -11,6 +12,7 @@ export default function DashboardPage() {
   const { user, token } = useAuth();
   const [worker, setWorker] = useState<WorkerStatusPayload | null>(null);
   const [listings, setListings] = useState<ListingRow[]>([]);
+  const [detail, setDetail] = useState<ListingRow | null>(null);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -44,6 +46,7 @@ export default function DashboardPage() {
 
   return (
     <div>
+      <ListingDetailModal listing={detail} onClose={() => setDetail(null)} />
       <h1 className="text-2xl font-semibold">Dashboard</h1>
       <p className="mt-2 max-w-2xl text-zinc-400">
         Welcome, {user?.username}. This overview refreshes every few seconds while the app is open.
@@ -141,7 +144,7 @@ export default function DashboardPage() {
         <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
           <h2 className="text-sm font-medium text-zinc-200">Alerts</h2>
           <p className="mt-2 text-3xl font-semibold text-zinc-100">{worker?.alerts_sent_count ?? "—"}</p>
-          <p className="mt-1 text-xs text-zinc-500">Telegram messages sent (profitable finds)</p>
+          <p className="mt-1 text-xs text-zinc-500">Telegram alerts sent (depends on alert mode in Settings)</p>
         </div>
       </div>
 
@@ -218,6 +221,7 @@ export default function DashboardPage() {
             All listings →
           </Link>
         </div>
+        <p className="mt-2 text-xs text-zinc-500">Click a row for full description and AI reasoning.</p>
         <div className="mt-4 overflow-x-auto rounded-xl border border-zinc-800">
           <table className="min-w-full text-left text-sm">
             <thead className="border-b border-zinc-800 bg-zinc-900/80 text-xs uppercase text-zinc-500">
@@ -233,7 +237,11 @@ export default function DashboardPage() {
             </thead>
             <tbody>
               {listings.slice(0, 8).map((r) => (
-                <tr key={r.id} className="border-b border-zinc-800/80">
+                <tr
+                  key={r.id}
+                  className="cursor-pointer border-b border-zinc-800/80 hover:bg-zinc-900/40"
+                  onClick={() => setDetail(r)}
+                >
                   <td className="max-w-xs truncate px-3 py-2">{r.title}</td>
                   <td className="whitespace-nowrap px-3 py-2">${r.price.toFixed(2)}</td>
                   <td className={`px-3 py-2 ${r.profitable ? "text-emerald-400" : ""}`}>

@@ -2,11 +2,20 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/context/auth-context";
+import { ListingDetailModal } from "@/components/listing-detail-modal";
 import { fetchCategories, fetchListings, type ListingRow, type MarketplaceCategory } from "@/lib/api";
+
+function reasoningPreview(text: string | null | undefined, max = 120): string {
+  const t = (text ?? "").trim();
+  if (!t) return "—";
+  if (t.length <= max) return t;
+  return `${t.slice(0, max)}…`;
+}
 
 export default function ListingsPage() {
   const { token } = useAuth();
   const [rows, setRows] = useState<ListingRow[]>([]);
+  const [detail, setDetail] = useState<ListingRow | null>(null);
   const [categories, setCategories] = useState<MarketplaceCategory[]>([]);
   const [profitableOnly, setProfitableOnly] = useState(false);
   const [category, setCategory] = useState<string>("");
@@ -36,6 +45,7 @@ export default function ListingsPage() {
 
   return (
     <div>
+      <ListingDetailModal listing={detail} onClose={() => setDetail(null)} />
       <h1 className="text-2xl font-semibold">Listings</h1>
       <div className="mt-4 flex flex-wrap items-end gap-4">
         <label className="flex items-center gap-2 text-sm">
@@ -94,7 +104,11 @@ export default function ListingsPage() {
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.id} className="border-b border-zinc-800/80">
+              <tr
+                key={r.id}
+                className="cursor-pointer border-b border-zinc-800/80 hover:bg-zinc-900/40"
+                onClick={() => setDetail(r)}
+              >
                 <td className="max-w-xs truncate px-3 py-2">{r.title}</td>
                 <td
                   className="max-w-[10rem] truncate px-3 py-2 text-zinc-400"
@@ -123,7 +137,7 @@ export default function ListingsPage() {
                     : "—"}
                 </td>
                 <td className="max-w-xs truncate px-3 py-2 text-zinc-400" title={r.reasoning ?? ""}>
-                  {r.reasoning ?? "—"}
+                  {reasoningPreview(r.reasoning)}
                 </td>
                 <td className="whitespace-nowrap px-3 py-2 text-zinc-400">
                   {new Date(r.found_at).toLocaleString()}
@@ -140,6 +154,7 @@ export default function ListingsPage() {
                     target="_blank"
                     rel="noreferrer"
                     className="text-emerald-400 hover:underline"
+                    onClick={(e) => e.stopPropagation()}
                   >
                     Open
                   </a>

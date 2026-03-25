@@ -18,7 +18,8 @@ from app.repositories.listing_repository import ListingRepository
 from app.repositories.user_repository import UserRepository
 from app.services.ai_scoring import MatchedCandidateInput, Step3ScoreResult, score_matched_candidate
 from app.services.profit_estimation import estimate_profit
-from app.services.telegram_service import send_profit_alert
+from app.services.search_settings import normalize_telegram_alert_mode
+from app.services.telegram_service import send_listing_alert
 from pymongo.database import Database
 
 from candidate_models import CandidateListing
@@ -236,15 +237,19 @@ def process_batch(
             profitable = score.estimated_profit > 0.0
             step4_fields = score.to_step4_fields()
             has_chat = bool((profile.telegram_chat_id or "").strip())
+            tg_mode = normalize_telegram_alert_mode(getattr(profile, "telegram_alert_mode", None))
 
             profile.worker_current_step = 4
             profile.worker_current_state = "step4_save_alert"
             profile.worker_pipeline_message = "Step 4: Saving results / sending alerts"
             _flush_pipeline(db, profile)
 
-            if not score.should_alert:
+            if tg_mode == "none":
                 init_alert_status = AlertStatus.skipped.value
-                init_alert_err: str | None = None
+                init_alert_err: str | None = "telegram_alert_mode_none"
+            elif tg_mode == "profitable_only" and not profitable:
+                init_alert_status = AlertStatus.skipped.value
+                init_alert_err = None
             elif not has_chat:
                 init_alert_status = AlertStatus.pending.value
                 init_alert_err = "telegram_chat_not_configured"
@@ -305,12 +310,23 @@ def process_batch(
                 flush=True,
             )
 
-            if score.should_alert and has_chat:
-                ok, terr = send_profit_alert(
+            should_send_telegram = (
+                tg_mode != "none"
+                and has_chat
+                and (tg_mode == "any_listing" or (tg_mode == "profitable_only" and profitable))
+            )
+            if should_send_telegram:
+                conf_for_alert = step4_fields.get("confidence")
+                ok, terr = send_listing_alert(
                     chat_id=profile.telegram_chat_id,
                     title=norm.title,
-                    source_link=norm.source_link,
+                    price=norm.price,
+                    estimated_resale=score.estimated_resale,
                     estimated_profit=score.estimated_profit,
+                    location_text=norm.location_text,
+                    description=(c.description or "").strip() or None,
+                    source_url=norm.source_url or norm.source_link,
+                    confidence=conf_for_alert if conf_for_alert is not None else None,
                 )
                 now = datetime.utcnow()
                 if ok:
