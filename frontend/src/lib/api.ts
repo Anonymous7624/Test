@@ -73,6 +73,11 @@ export type ListingRow = {
   confidence: string | number | null;
   reasoning: string | null;
   should_alert: boolean | null;
+  description?: string | null;
+  matched_keywords?: string[];
+  scraped_at?: string | null;
+  alert_sent_at?: string | null;
+  alert_last_error?: string | null;
 };
 
 export type Category = { id: string; label: string; keywords: string[] };

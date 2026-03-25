@@ -60,16 +60,20 @@ def send_profit_alert(
     title: str,
     source_link: str,
     estimated_profit: float,
-) -> bool:
-    """Sends alert to the given chat using TELEGRAM_BOT_TOKEN from app settings."""
+) -> tuple[bool, str | None]:
+    """
+    Sends alert to the given user's chat (multi-user: always pass that user's chat_id).
+    Returns (success, error_message_if_failed).
+    """
     token = _bot_token()
-    if not token or not chat_id or not str(chat_id).strip():
-        return False
+    if not token:
+        return False, "telegram_bot_token_not_configured"
+    if not chat_id or not str(chat_id).strip():
+        return False, "telegram_chat_not_configured"
     text = (
         f"Profit alert\n{title}\nEst. profit: {estimated_profit:.2f}\n{source_link}"
     )
-    ok, _ = _send_message(token, str(chat_id).strip(), text)
-    return ok
+    return _send_message(token, str(chat_id).strip(), text)
 
 
 def fetch_updates(*, offset: int | None = None, timeout: int = 0) -> tuple[list[dict[str, Any]], int | None]:

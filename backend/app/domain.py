@@ -1,6 +1,6 @@
 """Domain types for MongoDB-backed persistence (no SQLAlchemy ORM)."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 
@@ -59,3 +59,8 @@ class Listing:
     confidence: str | None
     reasoning: str | None
     should_alert: bool | None
+    description: str | None = None
+    matched_keywords: list[str] = field(default_factory=list)
+    scraped_at: datetime | None = None
+    alert_sent_at: datetime | None = None
+    alert_last_error: str | None = None

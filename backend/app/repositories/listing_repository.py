@@ -27,6 +27,19 @@ def _listing_from_doc(doc: dict) -> Listing:
     sa = doc.get("should_alert")
     if sa is None and ai_dict:
         sa = ai_dict.get("should_alert")
+
+    mk = doc.get("matched_keywords")
+    if isinstance(mk, list):
+        matched_kw = [str(x) for x in mk if x is not None and str(x).strip()]
+    else:
+        matched_kw = []
+
+    desc = doc.get("description")
+    desc_out = str(desc).strip() if desc is not None and str(desc).strip() else None
+
+    scraped = doc.get("scraped_at")
+    sent_at = doc.get("alert_sent_at")
+
     return Listing(
         id=int(doc["id"]),
         user_id=int(doc["user_id"]),
@@ -50,6 +63,11 @@ def _listing_from_doc(doc: dict) -> Listing:
         confidence=str(conf) if conf is not None else None,
         reasoning=str(reason) if reason is not None else None,
         should_alert=bool(sa) if sa is not None else None,
+        description=desc_out,
+        matched_keywords=matched_kw,
+        scraped_at=scraped if isinstance(scraped, datetime) else None,
+        alert_sent_at=sent_at if isinstance(sent_at, datetime) else None,
+        alert_last_error=str(doc["alert_last_error"]) if doc.get("alert_last_error") else None,
     )
 
 
@@ -79,15 +97,21 @@ class ListingRepository:
         alert_status: str,
         found_at: datetime | None = None,
         origin_type: str = "live",
+        description: str | None = None,
+        matched_keywords: list[str] | None = None,
+        scraped_at: datetime | None = None,
         ai_result: dict | None = None,
         confidence: str | float | None = None,
         reasoning: str | None = None,
         should_alert: bool | None = None,
+        alert_sent: bool = False,
+        alert_sent_at: datetime | None = None,
+        alert_last_error: str | None = None,
     ) -> Listing | None:
         """Insert listing; returns None if duplicate (user_id + source_url)."""
         lid = next_sequence(self.db, "listings")
         now = found_at or datetime.utcnow()
-        alert_sent = alert_status == AlertStatus.sent.value
+        kws = [str(x).strip() for x in (matched_keywords or []) if x and str(x).strip()]
         doc = {
             "id": lid,
             "user_id": user_id,
@@ -95,6 +119,7 @@ class ListingRepository:
             "source_id": source_id,
             "title": title,
             "price": price,
+            "description": (description or "").strip() or None,
             "estimated_resale": estimated_resale,
             "estimated_profit": estimated_profit,
             "category_id": category_id,
@@ -102,6 +127,7 @@ class ListingRepository:
             "location_text": location_text,
             "location": location_text,
             "found_at": now,
+            "scraped_at": scraped_at,
             "alert_status": alert_status,
             "source_link": source_link,
             "source": source,
@@ -109,6 +135,9 @@ class ListingRepository:
             "discovery_source": origin_type,
             "profitable": profitable,
             "alert_sent": alert_sent,
+            "alert_sent_at": alert_sent_at,
+            "alert_last_error": alert_last_error,
+            "matched_keywords": kws,
             "ai_result": ai_result,
             "confidence": confidence,
             "reasoning": reasoning,
@@ -119,6 +148,29 @@ class ListingRepository:
         except DuplicateKeyError:
             return None
         return _listing_from_doc(doc)
+
+    def set_alert_delivery(
+        self,
+        *,
+        listing_id: int,
+        user_id: int,
+        alert_sent: bool,
+        alert_status: str,
+        alert_sent_at: datetime | None,
+        alert_last_error: str | None,
+    ) -> None:
+        """Update Telegram delivery fields after send attempt (Step 4)."""
+        self.db["listings"].update_one(
+            {"id": listing_id, "user_id": user_id},
+            {
+                "$set": {
+                    "alert_sent": alert_sent,
+                    "alert_status": alert_status,
+                    "alert_sent_at": alert_sent_at,
+                    "alert_last_error": alert_last_error,
+                }
+            },
+        )
 
     def list_filtered(
         self,

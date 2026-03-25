@@ -11,3 +11,4 @@ class AlertStatus(str, enum.Enum):
     pending = "pending"
     sent = "sent"
     skipped = "skipped"
+    failed = "failed"

@@ -75,7 +75,11 @@ def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
         repo.replace_settings(s)
         raws = _collect_raws(s, backfill=True)
         if raws:
-            process_batch(db, raws, profile=s, origin_type="backfill")
+            stats = process_batch(db, raws, profile=s, origin_type="backfill")
+            print(
+                f"[user={s.user_id}] backfill batch: saved={stats.step4_saved} alerts_sent={stats.alerts_sent}",
+                flush=True,
+            )
         s.backfill_complete = True
         s.monitoring_state = "polling"
         s.last_checked_at = now
@@ -87,7 +91,11 @@ def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
     repo.replace_settings(s)
     raws = _collect_raws(s, backfill=False)
     if raws:
-        process_batch(db, raws, profile=s, origin_type="live")
+        stats = process_batch(db, raws, profile=s, origin_type="live")
+        print(
+            f"[user={s.user_id}] live batch: saved={stats.step4_saved} alerts_sent={stats.alerts_sent}",
+            flush=True,
+        )
     s.last_checked_at = now
     s.last_error = None
     repo.replace_settings(s)

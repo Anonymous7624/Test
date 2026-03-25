@@ -105,6 +105,7 @@ export default function DashboardPage() {
             <thead className="border-b border-zinc-800 bg-zinc-900/80 text-xs uppercase text-zinc-500">
               <tr>
                 <th className="px-3 py-2">Title</th>
+                <th className="px-3 py-2">Price</th>
                 <th className="px-3 py-2">Est. profit</th>
                 <th className="px-3 py-2">Confidence</th>
                 <th className="px-3 py-2">Mode</th>
@@ -116,6 +117,7 @@ export default function DashboardPage() {
               {listings.slice(0, 8).map((r) => (
                 <tr key={r.id} className="border-b border-zinc-800/80">
                   <td className="max-w-xs truncate px-3 py-2">{r.title}</td>
+                  <td className="whitespace-nowrap px-3 py-2">${r.price.toFixed(2)}</td>
                   <td className={`px-3 py-2 ${r.profitable ? "text-emerald-400" : ""}`}>
                     ${r.estimated_profit.toFixed(2)}
                   </td>
@@ -129,7 +131,11 @@ export default function DashboardPage() {
                   <td className="px-3 py-2 text-zinc-400">
                     {r.origin_type === "backfill" ? "Backfill" : "Live"}
                   </td>
-                  <td className="px-3 py-2 text-zinc-400">{r.alert_sent ? "Sent" : r.alert_status}</td>
+                  <td className="max-w-[12rem] px-3 py-2 text-xs text-zinc-400">
+                    {r.alert_sent && r.alert_sent_at
+                      ? `Sent ${new Date(r.alert_sent_at).toLocaleString()}`
+                      : `${r.alert_status}${r.alert_last_error ? ` — ${r.alert_last_error}` : ""}`}
+                  </td>
                   <td className="whitespace-nowrap px-3 py-2 text-zinc-500">
                     {new Date(r.found_at).toLocaleString()}
                   </td>
@@ -137,8 +143,9 @@ export default function DashboardPage() {
               ))}
               {listings.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-3 py-8 text-center text-zinc-500">
-                    No listings yet — run monitoring and keep the worker process running.
+                  <td colSpan={7} className="px-3 py-8 text-center text-zinc-500">
+                    No listings yet — enable monitoring in Settings and keep the worker connected to MongoDB so matches can
+                    be saved after AI scoring.
                   </td>
                 </tr>
               )}

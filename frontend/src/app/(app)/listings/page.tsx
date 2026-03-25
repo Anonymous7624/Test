@@ -76,6 +76,8 @@ export default function ListingsPage() {
           <thead className="border-b border-zinc-800 bg-zinc-900/80 text-xs uppercase text-zinc-500">
             <tr>
               <th className="px-3 py-2">Title</th>
+              <th className="px-3 py-2">Description</th>
+              <th className="px-3 py-2">Keywords</th>
               <th className="px-3 py-2">Price (USD)</th>
               <th className="px-3 py-2">Est. resale</th>
               <th className="px-3 py-2">Est. profit</th>
@@ -93,6 +95,15 @@ export default function ListingsPage() {
             {rows.map((r) => (
               <tr key={r.id} className="border-b border-zinc-800/80">
                 <td className="max-w-xs truncate px-3 py-2">{r.title}</td>
+                <td
+                  className="max-w-[10rem] truncate px-3 py-2 text-zinc-400"
+                  title={r.description ?? ""}
+                >
+                  {r.description?.trim() ? (r.description.length > 48 ? `${r.description.slice(0, 48)}…` : r.description) : "—"}
+                </td>
+                <td className="max-w-[8rem] truncate px-3 py-2 text-zinc-500" title={(r.matched_keywords ?? []).join(", ")}>
+                  {(r.matched_keywords ?? []).length ? (r.matched_keywords ?? []).join(", ") : "—"}
+                </td>
                 <td className="px-3 py-2">${r.price.toFixed(2)}</td>
                 <td className="px-3 py-2">${r.estimated_resale.toFixed(2)}</td>
                 <td className={`px-3 py-2 ${r.profitable ? "text-emerald-400" : ""}`}>
@@ -116,9 +127,11 @@ export default function ListingsPage() {
                 <td className="whitespace-nowrap px-3 py-2 text-zinc-400">
                   {new Date(r.found_at).toLocaleString()}
                 </td>
-                <td className="px-3 py-2">
-                  {r.alert_sent ? "sent" : r.alert_status}
-                  {r.should_alert != null ? ` (${r.should_alert ? "AI yes" : "AI no"})` : ""}
+                <td className="max-w-[14rem] px-3 py-2 text-xs text-zinc-400">
+                  {r.alert_sent && r.alert_sent_at
+                    ? `Sent ${new Date(r.alert_sent_at).toLocaleString()}`
+                    : `${r.alert_status}${r.alert_last_error ? ` — ${r.alert_last_error}` : ""}`}
+                  {r.should_alert != null ? ` · AI ${r.should_alert ? "yes" : "no"}` : ""}
                 </td>
                 <td className="px-3 py-2">
                   <a
@@ -134,11 +147,11 @@ export default function ListingsPage() {
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={12} className="px-3 py-12 text-center text-zinc-500">
+                <td colSpan={14} className="px-3 py-12 text-center text-zinc-500">
                   <p className="text-sm font-medium text-zinc-400">No listings yet</p>
-                  <p className="mt-2 max-w-md text-xs text-zinc-500">
-                    Save valid settings in Settings, verify Telegram, click Run monitoring, and keep the worker process
-                    running. Matching deals appear here with USD pricing and backfill vs live labels.
+                  <p className="mt-2 max-w-lg text-xs text-zinc-500">
+                    Turn on monitoring in Settings, keep the worker running against MongoDB, and wait for the collector to
+                    pass items through match → AI score → save. Rows here are real data from your account only.
                   </p>
                 </td>
               </tr>

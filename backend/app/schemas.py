@@ -128,6 +128,11 @@ class ListingOut(BaseModel):
     confidence: str | float | None = None
     reasoning: str | None = None
     should_alert: bool | None = None
+    description: str | None = None
+    matched_keywords: list[str] = Field(default_factory=list)
+    scraped_at: datetime | None = None
+    alert_sent_at: datetime | None = None
+    alert_last_error: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -136,6 +141,8 @@ class ListingOut(BaseModel):
         """Map domain Listing (and legacy field names) to API shape."""
         cid = getattr(row, "category_id", None) or getattr(row, "category_slug", "general")
         lt = getattr(row, "location_text", None) or getattr(row, "location", "")
+        mk = getattr(row, "matched_keywords", None)
+        keywords = list(mk) if isinstance(mk, list) else []
         return cls(
             id=row.id,
             title=row.title,
@@ -157,6 +164,11 @@ class ListingOut(BaseModel):
             confidence=getattr(row, "confidence", None),
             reasoning=getattr(row, "reasoning", None),
             should_alert=getattr(row, "should_alert", None),
+            description=getattr(row, "description", None),
+            matched_keywords=keywords,
+            scraped_at=getattr(row, "scraped_at", None),
+            alert_sent_at=getattr(row, "alert_sent_at", None),
+            alert_last_error=getattr(row, "alert_last_error", None),
         )
 
 
