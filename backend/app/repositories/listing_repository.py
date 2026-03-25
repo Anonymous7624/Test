@@ -18,6 +18,9 @@ def _listing_from_doc(doc: dict) -> Listing:
     conf = doc.get("confidence")
     if conf is None and ai_dict:
         conf = ai_dict.get("confidence")
+    if isinstance(conf, (int, float)):
+        x = float(conf)
+        conf = "low" if x < 0.34 else ("medium" if x < 0.67 else "high")
     reason = doc.get("reasoning")
     if reason is None and ai_dict:
         reason = ai_dict.get("reasoning")
@@ -44,7 +47,7 @@ def _listing_from_doc(doc: dict) -> Listing:
         profitable=bool(doc.get("profitable", False)),
         alert_sent=bool(doc.get("alert_sent", doc.get("alert_status") == AlertStatus.sent.value)),
         ai_result=raw_ai if isinstance(raw_ai, dict) else None,
-        confidence=float(conf) if conf is not None else None,
+        confidence=str(conf) if conf is not None else None,
         reasoning=str(reason) if reason is not None else None,
         should_alert=bool(sa) if sa is not None else None,
     )
@@ -77,7 +80,7 @@ class ListingRepository:
         found_at: datetime | None = None,
         origin_type: str = "live",
         ai_result: dict | None = None,
-        confidence: float | None = None,
+        confidence: str | float | None = None,
         reasoning: str | None = None,
         should_alert: bool | None = None,
     ) -> Listing | None:

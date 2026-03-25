@@ -125,7 +125,7 @@ class ListingOut(BaseModel):
     origin_type: str
     alert_sent: bool
     ai_result: dict[str, Any] | None = None
-    confidence: float | None = None
+    confidence: str | float | None = None
     reasoning: str | None = None
     should_alert: bool | None = None
 

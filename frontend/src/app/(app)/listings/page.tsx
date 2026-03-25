@@ -104,7 +104,11 @@ export default function ListingsPage() {
                   {r.origin_type === "backfill" ? "Backfill" : "Live"}
                 </td>
                 <td className="px-3 py-2 text-zinc-400">
-                  {r.confidence != null ? `${(r.confidence * 100).toFixed(0)}%` : "—"}
+                  {r.confidence != null
+                    ? typeof r.confidence === "number"
+                      ? `${(r.confidence * 100).toFixed(0)}%`
+                      : String(r.confidence)
+                    : "—"}
                 </td>
                 <td className="max-w-xs truncate px-3 py-2 text-zinc-400" title={r.reasoning ?? ""}>
                   {r.reasoning ?? "—"}

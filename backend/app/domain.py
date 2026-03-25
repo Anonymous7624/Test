@@ -56,6 +56,6 @@ class Listing:
     profitable: bool
     alert_sent: bool
     ai_result: dict | None
-    confidence: float | None
+    confidence: str | None
     reasoning: str | None
     should_alert: bool | None

@@ -1,11 +1,13 @@
 """
-Step 1 → Step 2 → Step 3 (Ollama) → MongoDB → optional Telegram.
+Step 1 → Step 2 → Step 3 (AI scoring) → Step 4 (MongoDB + optional Telegram).
 
-Step 1: normalize + light prefilter. Step 2: strict match + Mongo dedupe. Step 3+: scoring (unchanged).
+Step 1: normalize + light prefilter. Step 2: strict match + Mongo dedupe.
+Step 3: Ollama scoring only for Step-2 matches. Step 4: persistence / alerts.
 """
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -13,7 +15,8 @@ from datetime import datetime
 from app.domain import UserSettings as UserSettingsRow
 from app.models import AlertStatus
 from app.repositories.listing_repository import ListingRepository
-from app.services.ollama_scoring import score_listing_with_ollama
+from app.services.ai_scoring import MatchedCandidateInput, Step3ScoreResult, score_matched_candidate
+from app.services.profit_estimation import estimate_profit
 from app.services.telegram_service import send_profit_alert
 from pymongo.database import Database
 
@@ -22,6 +25,8 @@ from search_context import build_collection_inputs
 from step1_normalize import normalize_raw_to_candidate, prefilter_candidate
 from step2_matcher import strict_match
 from mock_scraper import RawListing
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -49,6 +54,16 @@ def normalized_from_candidate(c: CandidateListing) -> NormalizedListing:
     )
 
 
+def _condition_from_metadata(raw_metadata: dict) -> str:
+    if not isinstance(raw_metadata, dict):
+        return ""
+    for key in ("condition", "item_condition", "condition_text"):
+        v = raw_metadata.get(key)
+        if v and str(v).strip():
+            return str(v).strip()[:500]
+    return ""
+
+
 def process_batch(
     db: Database,
     raws: list[RawListing],
@@ -57,7 +72,7 @@ def process_batch(
     origin_type: str = "live",
 ) -> int:
     """
-    Run Step 1 (normalize + prefilter), Step 2 (strict match + dedupe), then AI + persistence.
+    Run Step 1 (normalize + prefilter), Step 2 (strict match + dedupe), then Step 3 + Step 4.
     Returns count inserted into MongoDB.
     """
     collection_inputs = build_collection_inputs(profile)
@@ -101,14 +116,56 @@ def process_batch(
         c = result.candidate_for_ai
         if c is None:
             continue
+
         norm = normalized_from_candidate(c)
-        score = score_listing_with_ollama(
-            title=norm.title,
-            price=norm.price,
-            category_id=norm.category_id,
-            location_text=norm.location_text,
-            source_url=norm.source_url,
+        print(
+            f"[user={profile.user_id}] step3: scoring candidate title={norm.title[:80]!r} "
+            f"url={norm.source_url}",
+            flush=True,
         )
+
+        step3_input = MatchedCandidateInput(
+            title=c.title,
+            price=c.price,
+            category_id=c.category_slug,
+            description=c.description or "",
+            location_text=c.location_text,
+            matched_keywords=list(result.matched_keywords),
+            source_url=c.source_url,
+            condition_text=_condition_from_metadata(c.raw_metadata),
+        )
+
+        try:
+            score = score_matched_candidate(step3_input)
+        except Exception as exc:  # noqa: BLE001 — never take down worker on Step 3
+            logger.exception("Step 3 unexpected error: %s", exc)
+            fb = estimate_profit(c.price, c.category_slug)
+            score = Step3ScoreResult(
+                estimated_resale=fb.estimated_resale,
+                estimated_profit=fb.estimated_profit,
+                confidence="low",
+                reasoning=f"Scoring failed unexpectedly; heuristic only. ({str(exc)[:160]})",
+                should_alert=False,
+                used_ollama=False,
+                ai_result={
+                    "estimated_resale": fb.estimated_resale,
+                    "estimated_profit": fb.estimated_profit,
+                    "confidence": "low",
+                    "reasoning": "worker_exception",
+                    "should_alert": False,
+                    "model": None,
+                    "scoring_error": str(exc)[:500],
+                    "used_ollama": False,
+                },
+            )
+
+        status = "ok" if score.used_ollama else "fallback"
+        print(
+            f"[user={profile.user_id}] step3: {status} profit={score.estimated_profit:.2f} "
+            f"should_alert={score.should_alert} used_ollama={score.used_ollama}",
+            flush=True,
+        )
+
         profitable = score.estimated_profit > 0.0
         if score.should_alert:
             sent = send_profit_alert(
@@ -121,6 +178,7 @@ def process_batch(
         else:
             alert_status = AlertStatus.skipped.value
 
+        step4_fields = score.to_step4_fields()
         created = repo.create(
             user_id=profile.user_id,
             source_url=norm.source_url,
@@ -137,10 +195,10 @@ def process_batch(
             alert_status=alert_status,
             found_at=datetime.utcnow(),
             origin_type=origin_type,
-            ai_result=score.ai_result,
-            confidence=score.confidence,
-            reasoning=score.reasoning,
-            should_alert=score.should_alert,
+            ai_result=step4_fields["ai_result"],
+            confidence=step4_fields["confidence"],
+            reasoning=step4_fields["reasoning"],
+            should_alert=step4_fields["should_alert"],
         )
         if created is not None:
             inserted += 1

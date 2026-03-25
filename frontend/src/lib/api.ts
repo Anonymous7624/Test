@@ -70,7 +70,7 @@ export type ListingRow = {
   profitable: boolean;
   alert_sent: boolean;
   ai_result: Record<string, unknown> | null;
-  confidence: number | null;
+  confidence: string | number | null;
   reasoning: string | null;
   should_alert: boolean | null;
 };

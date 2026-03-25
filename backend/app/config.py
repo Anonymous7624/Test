@@ -53,9 +53,10 @@ class Settings(BaseSettings):
         validation_alias="TELEGRAM_BOT_USERNAME",
     )
 
-    # Ollama (local LLM for listing scoring; worker and API may share)
+    # Ollama (local LLM for listing scoring; worker reads same env via backend settings)
     ollama_base_url: str = Field(default="http://127.0.0.1:11434", validation_alias="OLLAMA_BASE_URL")
     ollama_model: str = Field(default="llama3.2", validation_alias="OLLAMA_MODEL")
+    ollama_timeout: float = Field(default=120.0, validation_alias="OLLAMA_TIMEOUT")
 
 
 settings = Settings()
