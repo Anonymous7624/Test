@@ -23,6 +23,11 @@ from mock_scraper import RawListing
 from search_context import CollectionInputs
 from search_plan import SearchPlanInvalidError, validate_search_plan_for_step1
 
+from .marketplace_dom import (
+    log_no_results_diagnostics,
+    query_all_item_links_with_strategy,
+    wait_for_any_item_link,
+)
 from .marketplace_ui import (
     MarketplaceFilterError,
     apply_marketplace_filters_ui,
@@ -181,15 +186,41 @@ async def _parse_facebook_marketplace_page(
     collection_inputs: CollectionInputs,
     backfill: bool,
     max_items: int | None = None,
+    expected_query: str | None = None,
+    submission_meta: dict | None = None,
 ) -> list[RawListing]:
     """Parse search results: listing links and visible card text (price/title heuristics)."""
     await page.wait_for_load_state("domcontentloaded")
-    try:
-        await page.wait_for_selector('a[href*="/marketplace/item/"]', timeout=25_000)
-    except Exception as exc:
-        logger.warning("No marketplace item links found within timeout: %s", exc)
+    probe_name, probe_n = await wait_for_any_item_link(page, timeout_ms=25_000)
+    if probe_name and probe_n:
+        logger.info(
+            "Marketplace parse: item links detected via wait probe selector=%s count=%s",
+            probe_name,
+            probe_n,
+        )
 
-    links = await page.query_selector_all('a[href*="/marketplace/item/"]')
+    strategy_name, links = await query_all_item_links_with_strategy(page)
+    if not links:
+        reason = "selector_miss_or_empty_results"
+        if submission_meta and submission_meta.get("item_links_probe"):
+            ip = submission_meta["item_links_probe"]
+            if isinstance(ip, dict) and not ip.get("selector"):
+                reason = "probe_failed_after_submit"
+        await log_no_results_diagnostics(
+            page,
+            step_label="parse_facebook_marketplace_page",
+            expected_query=expected_query or "",
+            submission_meta={**(submission_meta or {}), "parse_reason": reason},
+        )
+        logger.warning(
+            "Marketplace parse: no listing anchors matched any strategy (tried ordered selectors)."
+        )
+        return []
+    logger.info(
+        "Marketplace parse: using selector strategy=%s link_count=%s",
+        strategy_name,
+        len(links),
+    )
     if max_items is None:
         max_items = 50 if backfill else 15
     seen: set[str] = set()
@@ -225,6 +256,14 @@ async def _parse_facebook_marketplace_page(
                 longitude=None,
                 source_id=f"fb:{iid}",
             )
+        )
+    if links and not out:
+        logger.warning(
+            "Marketplace parse: %s item links matched selector=%s but none passed price/title heuristics "
+            "(card text may have changed). url=%r",
+            len(links),
+            strategy_name,
+            page.url,
         )
     return out
 
@@ -355,7 +394,13 @@ async def fetch_listings_playwright(
                             per_cap,
                         )
                         try:
-                            await run_focused_marketplace_query(page, fq)
+                            sub_meta = await run_focused_marketplace_query(page, fq)
+                            logger.info(
+                                "Step 1 focused query submit user_id=%s term=%r meta=%s",
+                                plan.user_id,
+                                fq,
+                                sub_meta,
+                            )
                         except MarketplaceFilterError:
                             logger.exception(
                                 "Focused query failed user_id=%s term=%r",
@@ -368,6 +413,8 @@ async def fetch_listings_playwright(
                             collection_inputs=collection_inputs,
                             backfill=backfill,
                             max_items=per_cap,
+                            expected_query=fq,
+                            submission_meta=sub_meta,
                         )
                         logger.info(
                             "Step 1 focused query %s/%s user_id=%s term=%r cards_collected=%s (pre-dedupe)",

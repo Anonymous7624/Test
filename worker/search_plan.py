@@ -8,11 +8,14 @@ not via hand-built ``?maxPrice=...`` URLs.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 
 from app.domain import UserSettings as UserSettingsRow
 from app.services.categories_service import keywords_for_category
+
+logger = logging.getLogger(__name__)
 
 # Low-signal marketing / filler terms — never use as search queries unless explicitly allowed later.
 DEFAULT_EXCLUDED_QUERY_TOKENS: frozenset[str] = frozenset(
@@ -190,6 +193,13 @@ def build_search_plan(profile: UserSettingsRow) -> SearchPlan:
     cid = str(profile.category_id or "").strip() or "general"
     raw_kws = keywords_for_category(cid)
     focused = focused_queries_from_category_keywords(cid, raw_kws)
+    logger.info(
+        "Step 1 search keywords user_id=%s category_id=%s raw_category_keywords=%s focused_queries=%s",
+        int(profile.user_id),
+        cid,
+        list(raw_kws),
+        list(focused),
+    )
     loc = (profile.location_text or "").strip()
     r_mi = _radius_km_to_miles(float(profile.radius_km))
     slug = FB_MARKETPLACE_CATEGORY_SLUG.get(cid)

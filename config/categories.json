@@ -3,7 +3,14 @@
     {
       "id": "general",
       "label": "General",
-      "keywords": ["bookshelf", "mirror", "lamp", "rug", "frame"]
+      "keywords": [
+        "iphone",
+        "macbook",
+        "dyson",
+        "dewalt milwaukee",
+        "bicycle trek specialized",
+        "playstation xbox nintendo"
+      ]
     },
     {
       "id": "electronics",

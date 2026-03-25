@@ -21,6 +21,8 @@ from search_plan import (
     build_marketplace_entry_url,
 )
 
+from .marketplace_dom import marketplace_search_results_url, wait_for_any_item_link
+
 logger = logging.getLogger(__name__)
 
 
@@ -393,37 +395,154 @@ async def _apply_filters_confirm(page) -> None:
     raise MarketplaceFilterError("Could not confirm Filters (no Apply / See items button).")
 
 
-async def run_focused_marketplace_query(page, query: str) -> None:
-    """Use the search box after filters are applied; does not navigate to URL query strings."""
+async def run_focused_marketplace_query(page, query: str) -> dict[str, Any]:
+    """
+    Run a focused Marketplace search after filters are applied.
+
+    Prefer the search control inside ``[role="main"]`` so we do not submit the global header
+    search (which leaves Marketplace and yields no ``/marketplace/item/`` links).
+
+    If the UI does not navigate to a Marketplace search URL and no result links appear quickly,
+    fall back to the canonical ``/marketplace/search/?query=...`` URL (location/radius still apply
+    from the session; this is not a hand-built price/sort URL).
+    """
     q = (query or "").strip()
     if not q:
         raise MarketplaceFilterError("Internal error: empty focused query.")
 
-    search_candidates = [
-        page.get_by_role("combobox", name=re.compile(r"search", re.I)),
-        page.get_by_placeholder(re.compile(r"marketplace|search", re.I)),
-        page.locator('input[type="search"]'),
-        page.locator('input[placeholder*="Search"]'),
+    pre_url = page.url
+    meta: dict[str, Any] = {
+        "query": q,
+        "pre_submit_url": pre_url,
+        "post_submit_url": None,
+        "page_title_after": None,
+        "submission_method": None,
+        "search_scope_used": None,
+        "fallback_direct_search_url": None,
+        "item_links_probe": None,
+    }
+
+    # Order: Marketplace main first (avoid global header search combobox).
+    main = page.locator('[role="main"]')
+    search_candidates: list[tuple[str, Any]] = [
+        ("main_combobox_search", main.get_by_role("combobox", name=re.compile(r"search", re.I))),
+        (
+            "main_input_search",
+            main.locator('input[type="search"], input[placeholder*="Search" i]'),
+        ),
+        (
+            "main_placeholder_marketplace",
+            main.get_by_placeholder(re.compile(r"marketplace|search|buy", re.I)),
+        ),
+        (
+            "page_combobox_search",
+            page.get_by_role("combobox", name=re.compile(r"search", re.I)),
+        ),
+        (
+            "page_placeholder",
+            page.get_by_placeholder(re.compile(r"marketplace|search", re.I)),
+        ),
+        ("page_input_search", page.locator('input[type="search"]')),
+        ("page_input_placeholder_search", page.locator('input[placeholder*="Search" i]')),
     ]
+
     last_exc: Exception | None = None
-    for loc in search_candidates:
+    for scope_name, loc in search_candidates:
         try:
             if await loc.count() < 1:
                 continue
             el = loc.first
             await el.wait_for(state="visible", timeout=12_000)
+            await el.click()
             await el.fill("")
             await el.fill(q)
             await el.press("Enter")
             await page.wait_for_load_state("domcontentloaded")
-            await page.wait_for_timeout(500)
-            return
+            await page.wait_for_timeout(900)
+            post = page.url
+            meta["post_submit_url"] = post
+            try:
+                meta["page_title_after"] = await page.title()
+            except Exception:
+                pass
+            meta["submission_method"] = "ui_search_box"
+            meta["search_scope_used"] = scope_name
+            logger.info(
+                "Marketplace UI: focused query submitted scope=%s query=%r url_after=%r title=%r",
+                scope_name,
+                q,
+                post,
+                meta.get("page_title_after"),
+            )
+
+            probe_name, probe_count = await wait_for_any_item_link(page, timeout_ms=12_000)
+            meta["item_links_probe"] = {"selector": probe_name, "count": probe_count}
+            if probe_name and probe_count:
+                logger.info(
+                    "Marketplace UI: search verified (item links visible) scope=%s selector=%s count=%s",
+                    scope_name,
+                    probe_name,
+                    probe_count,
+                )
+                return meta
+
+            # UI may have used header search or SPA did not update URL — try canonical search URL.
+            direct = marketplace_search_results_url(q)
+            meta["fallback_direct_search_url"] = direct
+            logger.warning(
+                "Marketplace UI: no item links after UI submit; trying direct search URL query=%r "
+                "url_before_fallback=%r probe=%s",
+                q,
+                page.url,
+                meta["item_links_probe"],
+            )
+            await page.goto(direct, wait_until="domcontentloaded")
+            await page.wait_for_timeout(900)
+            meta["post_submit_url"] = page.url
+            try:
+                meta["page_title_after"] = await page.title()
+            except Exception:
+                pass
+            meta["submission_method"] = "direct_marketplace_search_url"
+            probe_name, probe_count = await wait_for_any_item_link(page, timeout_ms=15_000)
+            meta["item_links_probe"] = {"selector": probe_name, "count": probe_count}
+            logger.info(
+                "Marketplace UI: direct search URL loaded query=%r url_after=%r title=%r probe=%s",
+                q,
+                page.url,
+                meta.get("page_title_after"),
+                meta["item_links_probe"],
+            )
+            return meta
         except Exception as exc:
             last_exc = exc
             continue
-    raise MarketplaceFilterError(
-        f"Could not run focused query {q!r} (search input not found). Last: {last_exc!r}"
-    ) from last_exc
+
+    # No search box worked — still try direct Marketplace search (session location may apply).
+    direct = marketplace_search_results_url(q)
+    meta["fallback_direct_search_url"] = direct
+    meta["submission_method"] = "direct_marketplace_search_url_no_input"
+    logger.warning(
+        "Marketplace UI: no search input matched; navigating to direct search URL query=%r last_err=%r",
+        q,
+        last_exc,
+    )
+    await page.goto(direct, wait_until="domcontentloaded")
+    await page.wait_for_timeout(900)
+    meta["post_submit_url"] = page.url
+    try:
+        meta["page_title_after"] = await page.title()
+    except Exception:
+        pass
+    probe_name, probe_count = await wait_for_any_item_link(page, timeout_ms=18_000)
+    meta["item_links_probe"] = {"selector": probe_name, "count": probe_count}
+    logger.info(
+        "Marketplace UI: direct search only query=%r url_after=%r probe=%s",
+        q,
+        page.url,
+        meta["item_links_probe"],
+    )
+    return meta
 
 
 async def apply_marketplace_filters_ui(
