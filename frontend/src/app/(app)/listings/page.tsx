@@ -2,12 +2,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/context/auth-context";
-import { fetchCategories, fetchListings, type Category, type ListingRow } from "@/lib/api";
+import { fetchCategories, fetchListings, type ListingRow, type MarketplaceCategory } from "@/lib/api";
 
 export default function ListingsPage() {
   const { token } = useAuth();
   const [rows, setRows] = useState<ListingRow[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
+  const [categories, setCategories] = useState<MarketplaceCategory[]>([]);
   const [profitableOnly, setProfitableOnly] = useState(false);
   const [category, setCategory] = useState<string>("");
   const [err, setErr] = useState<string | null>(null);
@@ -55,8 +55,9 @@ export default function ListingsPage() {
             onChange={(e) => setCategory(e.target.value)}
           >
             <option value="">All</option>
+            <option value="custom_keywords">Custom keywords</option>
             {categories.map((c) => (
-              <option key={c.id} value={c.id}>
+              <option key={c.slug} value={c.slug}>
                 {c.label}
               </option>
             ))}

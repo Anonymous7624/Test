@@ -1,4 +1,4 @@
-"""Step 2: strict matching, dedupe against MongoDB, keyword + geo + price rules."""
+"""Step 2: strict matching, dedupe against MongoDB, geo + search-mode relevance (no max price)."""
 
 from __future__ import annotations
 
@@ -8,47 +8,47 @@ from pymongo.database import Database
 
 from app.domain import UserSettings as UserSettingsRow
 from app.repositories.listing_repository import ListingRepository
-from app.services.categories_service import keywords_for_category
 from app.services.geo_filter import listing_within_user_radius
+from app.services.search_settings import normalize_custom_keywords
 
 from candidate_models import CandidateListing, MatchResult
 from mock_scraper import RawListing
 
 
-def _keywords_matched_in_title(title: str, keywords: list[str]) -> list[str]:
-    t = title.lower()
-    out: list[str] = []
-    for k in keywords:
-        if not k or not str(k).strip():
-            continue
-        ks = str(k).strip().lower()
-        if ks and ks in t:
-            out.append(str(k).strip())
-    return out
-
-
-def category_and_keyword_ok(
+def search_mode_relevance_ok(
     *,
-    category_slug: str,
-    profile_category_id: str,
+    profile: UserSettingsRow,
     title: str,
+    description: str,
+    listing_category_slug: str,
 ) -> tuple[bool, list[str], list[str]]:
     """
-    Enforce category / keyword relevance (same semantics as legacy matcher).
-    If listing category matches profile, keywords are optional; else title must hit a category keyword.
+    Enforce search-mode relevance. Returns (ok, rejection_reasons, matched_keywords for custom mode).
     """
-    cid = str(profile_category_id or "").strip() or "general"
-    kws = keywords_for_category(cid)
-    matched = _keywords_matched_in_title(title, kws)
+    sm = (profile.search_mode or "marketplace_category").strip()
+    title_l = (title or "").lower()
+    desc_l = (description or "").lower()
+    blob = f"{title_l} {desc_l}"
 
-    if (category_slug or "").strip() == cid:
+    if sm == "marketplace_category":
+        want = (profile.marketplace_category_slug or "").strip().lower()
+        got = (listing_category_slug or "").strip().lower()
+        if want and got and got != want:
+            return False, ["category_slug_mismatch"], []
+        return True, [], []
+
+    if sm == "custom_keywords":
+        kws = normalize_custom_keywords(list(profile.custom_keywords or []))
+        matched: list[str] = []
+        for kw in kws:
+            ks = kw.strip().lower()
+            if ks and ks in blob:
+                matched.append(kw.strip())
+        if not matched:
+            return False, ["custom_keyword_no_match"], []
         return True, [], matched
 
-    if not kws:
-        return False, ["category_mismatch_no_keywords_configured"], matched
-    if not matched:
-        return False, ["category_keyword_mismatch"], matched
-    return True, [], matched
+    return False, ["unknown_search_mode"], []
 
 
 def strict_match(
@@ -57,9 +57,7 @@ def strict_match(
     db: Database,
 ) -> MatchResult:
     """
-    Evaluate one candidate in order: Mongo dedupe → price validity → geo → keywords → max price.
-
-    Rejection reason codes are logged in aggregate by the pipeline (bad price, duplicate, etc.).
+    Evaluate one candidate: Mongo dedupe → price validity → geo → search-mode relevance.
     """
     repo = ListingRepository(db)
     if repo.find_by_user_source_url(profile.user_id, candidate.source_url):
@@ -113,23 +111,16 @@ def strict_match(
             candidate_for_ai=None,
         )
 
-    ok_cat, cat_reasons, matched_kw = category_and_keyword_ok(
-        category_slug=candidate.category_slug,
-        profile_category_id=str(profile.category_id or ""),
+    ok_rel, rel_reasons, matched_kw = search_mode_relevance_ok(
+        profile=profile,
         title=candidate.title,
+        description=candidate.description or "",
+        listing_category_slug=candidate.category_slug,
     )
-    if not ok_cat:
+    if not ok_rel:
         return MatchResult(
             matched=False,
-            rejection_reasons=cat_reasons,
-            matched_keywords=matched_kw,
-            candidate_for_ai=None,
-        )
-
-    if p > float(profile.max_price) + 1e-6:
-        return MatchResult(
-            matched=False,
-            rejection_reasons=["over_max_price"],
+            rejection_reasons=rel_reasons,
             matched_keywords=matched_kw,
             candidate_for_ai=None,
         )

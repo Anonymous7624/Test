@@ -17,15 +17,15 @@ from app.schemas import (
     UserSettingsUpdate,
     user_settings_out_from_row,
 )
-from app.services.categories_service import validate_category_id
 from app.services.location_service import LocationResolutionError, resolve_location_for_save
+from app.services.marketplace_categories_service import label_for_slug
 from app.services.monitoring_validation import (
     readiness_checks,
     readiness_errors,
     settings_update_locked,
-    validate_max_price_usd,
     validate_radius_miles,
 )
+from app.services.search_settings import normalize_custom_keywords, validate_settings_for_save
 from app.services.telegram_service import send_test_message
 from app.services.units import km_to_miles, miles_to_km
 
@@ -95,11 +95,8 @@ def update_my_settings(
         del data["radius_miles"]
     elif "radius_km" in data and data["radius_km"] is not None:
         validate_radius_miles(km_to_miles(float(data["radius_km"])))
-    if "max_price" in data and data["max_price"] is not None:
-        validate_max_price_usd(float(data["max_price"]))
-    if "category_id" in data and data["category_id"] is not None:
-        if not validate_category_id(data["category_id"]):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid category")
+    if "custom_keywords" in data and data["custom_keywords"] is not None:
+        data["custom_keywords"] = normalize_custom_keywords(data["custom_keywords"])
 
     # Resolve Geoapify-backed location when the user edits location fields
     if _location_subset_changed(row, data) or (
@@ -143,8 +140,24 @@ def update_my_settings(
 
     for k, v in data.items():
         setattr(row, k, v)
+    if "search_mode" in data:
+        if row.search_mode == "custom_keywords":
+            row.marketplace_category_slug = None
+            row.marketplace_category_label = None
+    if "marketplace_category_slug" in data and data.get("marketplace_category_slug"):
+        slug = str(data["marketplace_category_slug"]).strip()
+        row.marketplace_category_slug = slug
+        row.marketplace_category_label = label_for_slug(slug) or slug
     if "telegram_chat_id" in data:
         row.telegram_connected = bool((data.get("telegram_chat_id") or "").strip())
+    try:
+        validate_settings_for_save(
+            search_mode=row.search_mode,
+            marketplace_category_slug=row.marketplace_category_slug,
+            custom_keywords=list(row.custom_keywords or []),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     repo.replace_settings(row)
     return user_settings_out_from_row(_get_settings_row(db, user))
 

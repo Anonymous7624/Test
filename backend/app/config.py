@@ -31,9 +31,12 @@ class Settings(BaseSettings):
     mongodb_uri: str = Field(default="mongodb://localhost:27017", validation_alias="MONGODB_URI")
     mongodb_database: str = Field(default="deal_dashboard", validation_alias="MONGODB_DATABASE")
 
-    # Categories JSON (centralized config)
+    # Categories JSON (legacy; listings may still reference old ids)
     categories_path: str = str(
         Path(__file__).resolve().parent.parent.parent / "config" / "categories.json"
+    )
+    marketplace_categories_path: str = str(
+        Path(__file__).resolve().parent.parent.parent / "config" / "marketplace_categories.json"
     )
 
     # CORS (comma-separated). Prefer BACKEND_CORS_ORIGINS; CORS_ORIGINS is accepted for compatibility.

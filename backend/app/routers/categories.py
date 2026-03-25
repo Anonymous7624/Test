@@ -1,10 +1,11 @@
 from fastapi import APIRouter
 
-from app.services.categories_service import load_categories
+from app.services.marketplace_categories_service import list_categories_for_api
 
 router = APIRouter(prefix="/categories", tags=["categories"])
 
 
 @router.get("")
 def list_categories() -> dict:
-    return load_categories()
+    """Built-in Marketplace categories (slug + label) for settings UI."""
+    return {"categories": list_categories_for_api()}

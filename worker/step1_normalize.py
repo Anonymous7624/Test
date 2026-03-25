@@ -31,16 +31,15 @@ def normalize_raw_to_candidate(
     scraped = datetime.utcnow()
     meta = {
         "collector_category_slug": raw.category_slug,
-        "profile_category_id": str(profile.category_id or "").strip(),
-        "profile_max_price_step2": float(profile.max_price),
+        "profile_search_mode": str(profile.search_mode or "").strip(),
+        "profile_marketplace_category_slug": profile.marketplace_category_slug,
         "collection": {
-            "category_id": collection_inputs.category_id,
+            "listing_category_ref": collection_inputs.listing_category_ref,
             "keywords": list(collection_inputs.keywords),
             "search_plan": collection_inputs.search_plan.to_log_dict(),
             "primary_search_location": collection_inputs.primary_search_location,
             "search_area_labels": list(collection_inputs.search_area_labels),
             "radius_hint": collection_inputs.radius_hint,
-            "max_price": collection_inputs.max_price,
         },
     }
     return CandidateListing(
@@ -54,7 +53,7 @@ def normalize_raw_to_candidate(
         image_url=raw.image_url,
         scraped_at=scraped,
         origin_type=origin_type,
-        category_slug=(raw.category_slug or "general").strip(),
+        category_slug=(raw.category_slug or "marketplace").strip(),
         latitude=raw.latitude,
         longitude=raw.longitude,
         source_link=source_url,
@@ -67,7 +66,7 @@ def prefilter_candidate(candidate: CandidateListing) -> tuple[bool, str | None]:
     """
     Light drops before Step 2: invalid rows, missing critical fields, non-numeric/non-positive price.
 
-    Profile max price is enforced in Step 2 only.
+    Step 2 applies search-mode relevance and a pre-AI strength gate (no max-price filter).
     """
     if not candidate.source_url.strip():
         return False, "missing_source_url"

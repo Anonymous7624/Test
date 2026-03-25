@@ -59,17 +59,15 @@ async def _collect_raws(
         )
         if backfill:
             raws = mock_fetch_backfill(
-                category_slug=inputs.category_id,
+                category_slug=inputs.listing_category_ref,
                 location=inputs.primary_search_location,
-                max_price=inputs.max_price,
                 keywords=inputs.keywords,
                 search_area_labels=inputs.search_area_labels,
             )
         else:
             raws = mock_fetch_batch(
-                category_slug=inputs.category_id,
+                category_slug=inputs.listing_category_ref,
                 location=inputs.primary_search_location,
-                max_price=inputs.max_price,
                 keywords=inputs.keywords,
                 search_area_labels=inputs.search_area_labels,
             )

@@ -568,7 +568,6 @@ async def apply_marketplace_filters_ui(
         "location_text": (plan.location_text or "").strip(),
         "radius_miles_requested": round(plan.radius_miles, 2),
         "radius_miles_snapped": _snap_radius_miles(plan.radius_miles),
-        "max_price": "enforced_in_step2_only",
         "sort_mode": plan.sort_mode,
         "sort_ui_label": _sort_label_for_plan(plan),
         "location_radius_ok": False,

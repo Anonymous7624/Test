@@ -6,6 +6,7 @@ from pymongo.database import Database
 from app.domain import User, UserSettings as UserSettingsState
 from app.models import UserRole
 from app.mongodb import next_sequence
+from app.services.search_settings import migrate_settings_doc
 
 
 def _default_settings_doc(user_id: int) -> dict:
@@ -17,8 +18,10 @@ def _default_settings_doc(user_id: int) -> dict:
         "geoapify_place_id": None,
         "boundary_context": None,
         "radius_km": 25.0,
-        "category_id": "general",
-        "max_price": 10_000.0,
+        "search_mode": "marketplace_category",
+        "marketplace_category_label": "Electronics",
+        "marketplace_category_slug": "electronics",
+        "custom_keywords": [],
         "telegram_chat_id": None,
         "telegram_connected": False,
         "telegram_verify_code": None,
@@ -55,38 +58,41 @@ def _user_from_doc(doc: dict) -> User:
 
 
 def settings_from_doc(doc: dict) -> UserSettingsState:
+    d = migrate_settings_doc(dict(doc))
     return UserSettingsState(
-        user_id=int(doc["user_id"]),
-        location_text=str(doc.get("location_text") or ""),
-        center_lat=doc.get("center_lat"),
-        center_lon=doc.get("center_lon"),
-        geoapify_place_id=doc.get("geoapify_place_id"),
-        boundary_context=doc.get("boundary_context"),
-        radius_km=float(doc.get("radius_km", 25.0)),
-        category_id=str(doc.get("category_id") or "general"),
-        max_price=float(doc.get("max_price", 10_000.0)),
-        telegram_chat_id=doc.get("telegram_chat_id"),
-        telegram_connected=bool(doc.get("telegram_connected", False)),
-        telegram_verify_code=doc.get("telegram_verify_code"),
-        telegram_verify_expires_at=doc.get("telegram_verify_expires_at"),
-        monitoring_enabled=bool(doc.get("monitoring_enabled", False)),
-        monitoring_state=str(doc.get("monitoring_state") or "idle"),
-        last_checked_at=doc.get("last_checked_at"),
-        last_error=doc.get("last_error"),
-        backfill_complete=bool(doc.get("backfill_complete", True)),
-        worker_current_step=int(doc.get("worker_current_step", 0)),
-        worker_current_state=str(doc.get("worker_current_state") or "idle"),
-        worker_pipeline_message=str(doc.get("worker_pipeline_message") or ""),
-        worker_last_batch_started_at=doc.get("worker_last_batch_started_at"),
-        worker_last_success_at=doc.get("worker_last_success_at"),
-        worker_count_raw_collected=int(doc.get("worker_count_raw_collected", 0)),
-        worker_count_step1_kept=int(doc.get("worker_count_step1_kept", 0)),
-        worker_count_step2_matched=int(doc.get("worker_count_step2_matched", 0)),
-        worker_count_step3_scored=int(doc.get("worker_count_step3_scored", 0)),
-        worker_count_step4_saved=int(doc.get("worker_count_step4_saved", 0)),
-        worker_count_alerts_sent=int(doc.get("worker_count_alerts_sent", 0)),
-        worker_pipeline_error=doc.get("worker_pipeline_error"),
-        worker_collector_warning=doc.get("worker_collector_warning"),
+        user_id=int(d["user_id"]),
+        location_text=str(d.get("location_text") or ""),
+        center_lat=d.get("center_lat"),
+        center_lon=d.get("center_lon"),
+        geoapify_place_id=d.get("geoapify_place_id"),
+        boundary_context=d.get("boundary_context"),
+        radius_km=float(d.get("radius_km", 25.0)),
+        search_mode=str(d.get("search_mode") or "marketplace_category"),
+        marketplace_category_label=d.get("marketplace_category_label"),
+        marketplace_category_slug=d.get("marketplace_category_slug"),
+        custom_keywords=list(d.get("custom_keywords") or []),
+        telegram_chat_id=d.get("telegram_chat_id"),
+        telegram_connected=bool(d.get("telegram_connected", False)),
+        telegram_verify_code=d.get("telegram_verify_code"),
+        telegram_verify_expires_at=d.get("telegram_verify_expires_at"),
+        monitoring_enabled=bool(d.get("monitoring_enabled", False)),
+        monitoring_state=str(d.get("monitoring_state") or "idle"),
+        last_checked_at=d.get("last_checked_at"),
+        last_error=d.get("last_error"),
+        backfill_complete=bool(d.get("backfill_complete", True)),
+        worker_current_step=int(d.get("worker_current_step", 0)),
+        worker_current_state=str(d.get("worker_current_state") or "idle"),
+        worker_pipeline_message=str(d.get("worker_pipeline_message") or ""),
+        worker_last_batch_started_at=d.get("worker_last_batch_started_at"),
+        worker_last_success_at=d.get("worker_last_success_at"),
+        worker_count_raw_collected=int(d.get("worker_count_raw_collected", 0)),
+        worker_count_step1_kept=int(d.get("worker_count_step1_kept", 0)),
+        worker_count_step2_matched=int(d.get("worker_count_step2_matched", 0)),
+        worker_count_step3_scored=int(d.get("worker_count_step3_scored", 0)),
+        worker_count_step4_saved=int(d.get("worker_count_step4_saved", 0)),
+        worker_count_alerts_sent=int(d.get("worker_count_alerts_sent", 0)),
+        worker_pipeline_error=d.get("worker_pipeline_error"),
+        worker_collector_warning=d.get("worker_collector_warning"),
     )
 
 

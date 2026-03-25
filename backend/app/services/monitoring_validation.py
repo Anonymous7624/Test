@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import TypedDict
 
 from app.domain import UserSettings as UserSettingsRow
-from app.services.categories_service import validate_category_id
+from app.services.marketplace_categories_service import validate_marketplace_slug
+from app.services.search_settings import normalize_custom_keywords
 from app.services.units import km_to_miles, miles_to_km
 
 MIN_RADIUS_MILES = 5.0
-MIN_MAX_PRICE_USD = 10.0
 
 
 class ReadinessCheck(TypedDict):
@@ -36,12 +36,20 @@ def telegram_is_configured(s: UserSettingsRow) -> bool:
     return bool(s.telegram_connected) or bool((s.telegram_chat_id or "").strip())
 
 
+def _search_config_ok(s: UserSettingsRow) -> bool:
+    sm = (s.search_mode or "marketplace_category").strip()
+    if sm == "marketplace_category":
+        return bool(validate_marketplace_slug(str(s.marketplace_category_slug or "")))
+    if sm == "custom_keywords":
+        return len(normalize_custom_keywords(s.custom_keywords)) >= 1
+    return False
+
+
 def readiness_checks(s: UserSettingsRow) -> list[ReadinessCheck]:
     """Structured checklist for UI (✅/❌)."""
     loc_ok = _location_complete(s)
-    cat_ok = bool(validate_category_id(s.category_id) and (s.category_id or "").strip())
+    search_ok = _search_config_ok(s)
     rad_ok = _radius_miles(s) >= MIN_RADIUS_MILES
-    price_ok = float(s.max_price) >= MIN_MAX_PRICE_USD
     tg_ok = telegram_is_configured(s)
     return [
         {
@@ -50,19 +58,14 @@ def readiness_checks(s: UserSettingsRow) -> list[ReadinessCheck]:
             "ok": loc_ok,
         },
         {
-            "id": "category",
-            "label": "Category selected",
-            "ok": cat_ok,
+            "id": "search",
+            "label": "Search mode configured (category or keywords)",
+            "ok": search_ok,
         },
         {
             "id": "radius",
             "label": f"Radius ≥ {MIN_RADIUS_MILES:.0f} miles",
             "ok": rad_ok,
-        },
-        {
-            "id": "max_price",
-            "label": f"Max price ≥ ${MIN_MAX_PRICE_USD:.0f}",
-            "ok": price_ok,
         },
         {
             "id": "telegram",
@@ -79,10 +82,15 @@ def readiness_errors(s: UserSettingsRow) -> list[str]:
         errors.append("Location is required.")
     elif not _location_complete(s):
         errors.append("Pick a location from the search suggestions (Geoapify).")
-    if not validate_category_id(s.category_id) or not (s.category_id or "").strip():
-        errors.append("Select a valid category.")
-    if float(s.max_price) < MIN_MAX_PRICE_USD:
-        errors.append(f"Max price must be at least ${MIN_MAX_PRICE_USD:.0f} USD.")
+    sm = (s.search_mode or "marketplace_category").strip()
+    if sm == "marketplace_category":
+        if not validate_marketplace_slug(str(s.marketplace_category_slug or "")):
+            errors.append("Select a Marketplace category.")
+    elif sm == "custom_keywords":
+        if len(normalize_custom_keywords(s.custom_keywords)) < 1:
+            errors.append("Add at least one custom keyword (up to 15).")
+    else:
+        errors.append("Invalid search mode.")
     if _radius_miles(s) < MIN_RADIUS_MILES:
         errors.append(f"Radius must be at least {MIN_RADIUS_MILES:.0f} miles.")
     if not telegram_is_configured(s):
@@ -97,11 +105,6 @@ def is_ready_for_monitoring(s: UserSettingsRow) -> bool:
 def validate_radius_miles(miles: float) -> None:
     if miles < MIN_RADIUS_MILES:
         raise ValueError(f"Radius must be at least {MIN_RADIUS_MILES:.0f} miles.")
-
-
-def validate_max_price_usd(price: float) -> None:
-    if price < MIN_MAX_PRICE_USD:
-        raise ValueError(f"Max price must be at least ${MIN_MAX_PRICE_USD:.0f} USD.")
 
 
 def radius_km_from_miles(miles: float) -> float:

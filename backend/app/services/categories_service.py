@@ -22,12 +22,7 @@ def validate_category_id(category_id: str) -> bool:
 
 
 def keywords_for_category(category_id: str) -> list[str]:
-    if (category_id or "").strip() == "general":
-        from app.services.general_profitable_pack import match_keywords_for_general
-
-        mk = match_keywords_for_general()
-        if mk:
-            return mk
+    """Legacy categories.json keywords (unused by the new search pipeline)."""
     data = load_categories()
     for c in data.get("categories") or []:
         if c.get("id") == category_id:

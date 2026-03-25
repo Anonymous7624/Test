@@ -1,0 +1,19 @@
+{
+  "categories": [
+    { "slug": "apparel", "label": "Apparel" },
+    { "slug": "electronics", "label": "Electronics" },
+    { "slug": "entertainment", "label": "Entertainment" },
+    { "slug": "family", "label": "Family" },
+    { "slug": "free-stuff", "label": "Free Stuff" },
+    { "slug": "garden-and-outdoor", "label": "Garden & Outdoor" },
+    { "slug": "hobbies", "label": "Hobbies" },
+    { "slug": "home-goods", "label": "Home Goods" },
+    { "slug": "home-improvement-supplies", "label": "Home Improvement Supplies" },
+    { "slug": "musical-instruments", "label": "Musical Instruments" },
+    { "slug": "office-supplies", "label": "Office Supplies" },
+    { "slug": "pet-supplies", "label": "Pet Supplies" },
+    { "slug": "sporting-goods", "label": "Sporting Goods" },
+    { "slug": "toys-and-games", "label": "Toys & Games" }
+  ],
+  "notes": "URL path segment for https://www.facebook.com/marketplace/category/{slug}/ — edit slugs if Meta changes routing."
+}

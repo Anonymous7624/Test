@@ -30,8 +30,9 @@ function editableSnapshot(s: UserSettings): string {
     center_lon: s.center_lon,
     geoapify_place_id: s.geoapify_place_id,
     radius_miles: s.radius_miles,
-    category_id: s.category_id,
-    max_price: s.max_price,
+    search_mode: s.search_mode,
+    marketplace_category_slug: s.marketplace_category_slug,
+    custom_keywords: s.custom_keywords,
     telegram_chat_id: s.telegram_chat_id ?? null,
   });
 }
@@ -42,7 +43,8 @@ export default function SettingsPage() {
   const router = useRouter();
   const { token, logout, user } = useAuth();
   const [settings, setSettings] = useState<UserSettings | null>(null);
-  const [categoryOptions, setCategoryOptions] = useState<{ id: string; label: string }[]>([]);
+  const [categoryOptions, setCategoryOptions] = useState<{ slug: string; label: string }[]>([]);
+  const [keywordDraft, setKeywordDraft] = useState("");
   const [telegramMsg, setTelegramMsg] = useState<string | null>(null);
   const [verifyInfo, setVerifyInfo] = useState<{
     code: string;
@@ -68,7 +70,7 @@ export default function SettingsPage() {
     setLoadError(null);
     try {
       const [{ categories }, s, st, rd] = await Promise.all([
-        fetchCategories().catch(() => ({ categories: [] as { id: string; label: string }[] })),
+        fetchCategories().catch(() => ({ categories: [] as { slug: string; label: string }[] })),
         fetchSettings(token),
         workerStatus(token),
         fetchMonitoringReadiness(token).catch(
@@ -79,7 +81,7 @@ export default function SettingsPage() {
           }),
         ),
       ]);
-      setCategoryOptions(categories.map((c) => ({ id: c.id, label: c.label })));
+      setCategoryOptions(categories.map((c) => ({ slug: c.slug, label: c.label })));
       setSettings(s);
       lastSavedSnapshotRef.current = editableSnapshot(s);
       isHydratedRef.current = true;
@@ -443,40 +445,159 @@ export default function SettingsPage() {
               }
             />
           </div>
-          <div>
-            <label className="block text-xs text-zinc-500">Category</label>
-            <select
-              disabled={settingsLocked}
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm disabled:cursor-not-allowed"
-              value={settings.category_id}
-              onChange={(e) => setSettings({ ...settings, category_id: e.target.value })}
-            >
-              {categoryOptions.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs text-zinc-500">Max price (USD)</label>
-            <input
-              type="number"
-              min={10}
-              step={1}
-              disabled={settingsLocked}
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm disabled:cursor-not-allowed"
-              value={settings.max_price}
-              onChange={(e) =>
-                setSettings({ ...settings, max_price: Number(e.target.value) })
-              }
-            />
-            <p className="mt-1 text-[11px] text-zinc-500">Prices are shown and stored in US dollars.</p>
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs text-zinc-500">Search mode</label>
+              <select
+                disabled={settingsLocked}
+                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm disabled:cursor-not-allowed"
+                value={settings.search_mode}
+                onChange={(e) => {
+                  const v = e.target.value as "marketplace_category" | "custom_keywords";
+                  if (v === "marketplace_category") {
+                    const first = categoryOptions[0]?.slug ?? "electronics";
+                    const slug = settings.marketplace_category_slug ?? first;
+                    setSettings({
+                      ...settings,
+                      search_mode: v,
+                      marketplace_category_slug: slug,
+                      marketplace_category_label:
+                        categoryOptions.find((c) => c.slug === slug)?.label ?? null,
+                    });
+                  } else {
+                    setSettings({
+                      ...settings,
+                      search_mode: v,
+                      marketplace_category_slug: null,
+                      marketplace_category_label: null,
+                    });
+                  }
+                }}
+              >
+                <option value="marketplace_category">Built-in Marketplace category</option>
+                <option value="custom_keywords">Custom keywords</option>
+              </select>
+              <p className="mt-1 text-[11px] text-zinc-500">
+                Category mode scrolls the official Marketplace category feed. Keyword mode runs a Marketplace search
+                for each phrase (not global Facebook search).
+              </p>
+            </div>
+
+            {settings.search_mode === "marketplace_category" ? (
+              <div>
+                <label className="block text-xs text-zinc-500">Marketplace category</label>
+                <select
+                  disabled={settingsLocked}
+                  className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm disabled:cursor-not-allowed"
+                  value={settings.marketplace_category_slug ?? ""}
+                  onChange={(e) => {
+                    const slug = e.target.value;
+                    const lab = categoryOptions.find((c) => c.slug === slug)?.label ?? slug;
+                    setSettings({
+                      ...settings,
+                      marketplace_category_slug: slug,
+                      marketplace_category_label: lab,
+                    });
+                  }}
+                >
+                  {categoryOptions.map((c) => (
+                    <option key={c.slug} value={c.slug}>
+                      {c.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div>
+                <label className="block text-xs text-zinc-500">
+                  Custom keywords <span className="text-zinc-600">({settings.custom_keywords.length}/15)</span>
+                </label>
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {settings.custom_keywords.map((kw, i) => (
+                    <span
+                      key={`${kw}-${i}`}
+                      className="inline-flex items-center gap-1 rounded-full border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-xs text-zinc-200"
+                    >
+                      {kw}
+                      <button
+                        type="button"
+                        disabled={settingsLocked}
+                        className="rounded px-1 text-zinc-500 hover:text-zinc-200 disabled:cursor-not-allowed"
+                        onClick={() =>
+                          setSettings({
+                            ...settings,
+                            custom_keywords: settings.custom_keywords.filter((_, j) => j !== i),
+                          })
+                        }
+                        aria-label={`Remove ${kw}`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <div className="mt-2 flex gap-2">
+                  <input
+                    type="text"
+                    disabled={settingsLocked || settings.custom_keywords.length >= 15}
+                    placeholder="e.g. iphone, herman miller"
+                    className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm disabled:cursor-not-allowed"
+                    value={keywordDraft}
+                    onChange={(e) => setKeywordDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        const t = keywordDraft.trim();
+                        if (!t || settings.custom_keywords.length >= 15) return;
+                        if (
+                          settings.custom_keywords.some((k) => k.toLowerCase() === t.toLowerCase())
+                        ) {
+                          setKeywordDraft("");
+                          return;
+                        }
+                        setSettings({
+                          ...settings,
+                          custom_keywords: [...settings.custom_keywords, t],
+                        });
+                        setKeywordDraft("");
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    disabled={
+                      settingsLocked ||
+                      settings.custom_keywords.length >= 15 ||
+                      !keywordDraft.trim()
+                    }
+                    className="shrink-0 rounded-lg bg-zinc-800 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40"
+                    onClick={() => {
+                      const t = keywordDraft.trim();
+                      if (!t || settings.custom_keywords.length >= 15) return;
+                      if (settings.custom_keywords.some((k) => k.toLowerCase() === t.toLowerCase())) {
+                        setKeywordDraft("");
+                        return;
+                      }
+                      setSettings({
+                        ...settings,
+                        custom_keywords: [...settings.custom_keywords, t],
+                      });
+                      setKeywordDraft("");
+                    }}
+                  >
+                    Add
+                  </button>
+                </div>
+                <p className="mt-1 text-[11px] text-zinc-500">
+                  Up to 15 phrases; duplicates and extra spaces are removed on save.
+                </p>
+              </div>
+            )}
           </div>
 
           <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-3">
             <p className="text-xs text-zinc-400">
-              Location, radius, category, price, and Telegram fields save automatically shortly after you stop editing.
+              Location, radius, search settings, and Telegram fields save automatically shortly after you stop editing.
               Partial progress is kept when validation fails for a field (check the status above).
             </p>
           </div>

@@ -32,17 +32,16 @@ def mock_fetch_batch(
     *,
     category_slug: str,
     location: str,
-    max_price: float,
     keywords: list[str] | None = None,
     search_area_labels: list[str] | None = None,
 ) -> list[RawListing]:
-    """Return 0–2 synthetic listings under max_price (live monitoring), profile-targeted."""
+    """Return 0–2 synthetic listings (live monitoring), profile-targeted."""
     n = random.randint(0, 2)
     out: list[RawListing] = []
     areas = list(search_area_labels or [])
     kws = list(keywords or [])
     for _ in range(n):
-        price = round(random.uniform(20, min(max_price, max_price * 0.95)), 2)
+        price = round(random.uniform(20, 2_500), 2)
         rid = uuid.uuid4().hex[:12]
         loc = _pick_location(location, areas)
         kw_bit = f" {random.choice(kws)}" if kws and random.random() > 0.2 else ""
@@ -66,7 +65,6 @@ def mock_fetch_backfill(
     *,
     category_slug: str,
     location: str,
-    max_price: float,
     keywords: list[str] | None = None,
     search_area_labels: list[str] | None = None,
     batch_size: int = 12,
@@ -77,7 +75,7 @@ def mock_fetch_backfill(
     areas = list(search_area_labels or [])
     kws = list(keywords or [])
     for _ in range(n):
-        price = round(random.uniform(15, min(max_price, max_price * 0.9)), 2)
+        price = round(random.uniform(15, 3_000), 2)
         rid = uuid.uuid4().hex[:12]
         loc = _pick_location(location, areas)
         kw_bit = f" {random.choice(kws)}" if kws and random.random() > 0.15 else ""

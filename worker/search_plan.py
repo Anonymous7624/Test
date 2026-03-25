@@ -1,9 +1,9 @@
 """
-Structured Step 1 search plans: Marketplace filters + focused product queries (no keyword blobs).
+Structured Step 1 search plans: Marketplace category browse or keyword searches.
 
-Step 1 uses a path-only Marketplace entry URL (category segment when set), then applies
-location, radius, and sort in the browser UI. Focused terms run via the search box —
-not via hand-built ``?maxPrice=...`` URLs. Profile max price is applied in Step 2 only.
+Step 1 uses a path-only Marketplace entry URL (category segment when in marketplace_category mode),
+then applies location, radius, and sort in the browser UI. Custom keyword mode runs each phrase
+via the Marketplace search box (never global Facebook search).
 """
 
 from __future__ import annotations
@@ -11,15 +11,13 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Literal
 
 from app.domain import UserSettings as UserSettingsRow
-from app.services.categories_service import keywords_for_category
-from app.services.general_profitable_pack import select_general_search_queries_for_cycle
+from app.services.search_settings import normalize_custom_keywords
 
 logger = logging.getLogger(__name__)
 
-# Low-signal marketing / filler terms — never use as search queries unless explicitly allowed later.
 DEFAULT_EXCLUDED_QUERY_TOKENS: frozenset[str] = frozenset(
     {
         "deal",
@@ -54,24 +52,13 @@ DEFAULT_EXCLUDED_QUERY_TOKENS: frozenset[str] = frozenset(
     }
 )
 
-# Internal category id -> Facebook Marketplace category path segment (browse + filters on category).
-# ``None`` = use global ``/marketplace/search/`` (no category path).
-FB_MARKETPLACE_CATEGORY_SLUG: dict[str, str | None] = {
-    "general": None,
-    "electronics": "electronics",
-    "furniture": "furniture",
-    "vehicles": "vehicles",
-}
-
-# Default: newest first (good for monitoring). Internal key; UI shows a label (e.g. "Newest first").
 DEFAULT_MARKETPLACE_SORT = "creation_time_descend"
 
-# Map internal sort_mode -> English Marketplace UI label (logged-in web, en locale).
 MARKETPLACE_SORT_UI_LABEL: dict[str, str] = {
     "creation_time_descend": "Newest first",
 }
 
-_MAX_FOCUS_QUERIES = 6
+_MAX_FOCUS_QUERIES = 15
 _TOKEN_SPLIT_RE = re.compile(r"[\s,/]+")
 
 
@@ -85,27 +72,17 @@ def _sanitize_token(t: str) -> str | None:
         return None
     if s in DEFAULT_EXCLUDED_QUERY_TOKENS:
         return None
-    # strip simple surrounding punctuation
     s = s.strip("'\"")
     if len(s) < 2 or s in DEFAULT_EXCLUDED_QUERY_TOKENS:
         return None
     return s
 
 
-def focused_queries_from_category_keywords(
-    category_id: str,
-    raw_keywords: list[str],
-    *,
-    max_queries: int = _MAX_FOCUS_QUERIES,
-) -> list[str]:
-    """
-    Build a short list of high-signal search strings from config keywords.
-    Drops generic marketplace filler words; keeps product nouns and short phrases.
-    """
+def focused_queries_from_custom_keywords(raw_keywords: list[str], *, max_queries: int = _MAX_FOCUS_QUERIES) -> list[str]:
+    """Deduped keyword phrases for Marketplace search (custom_keywords mode)."""
     seen_lower: set[str] = set()
     out: list[str] = []
-
-    for phrase in raw_keywords:
+    for phrase in normalize_custom_keywords(raw_keywords):
         if not phrase or not str(phrase).strip():
             continue
         parts = [p for p in _TOKEN_SPLIT_RE.split(str(phrase).strip()) if p]
@@ -116,7 +93,6 @@ def focused_queries_from_category_keywords(
                 kept_tokens.append(tok)
         if not kept_tokens:
             continue
-        # Title-case lightly for readability in logs; URL encoding preserves meaning.
         q = " ".join(kept_tokens)
         low = q.lower()
         if low in seen_lower:
@@ -125,22 +101,15 @@ def focused_queries_from_category_keywords(
         out.append(q)
         if len(out) >= max_queries:
             break
-
     return out
 
 
 class SearchPlanInvalidError(RuntimeError):
-    """Raised when a profile cannot produce a valid Step 1 search plan (no queries, no location, etc.)."""
+    """Raised when a profile cannot produce a valid Step 1 search plan."""
 
 
 def build_marketplace_entry_url(plan: SearchPlan) -> str:
-    """
-    Path-only Marketplace entry URL (no filter query string).
-
-    Category context uses ``/marketplace/category/{slug}/`` when configured; otherwise ``/marketplace/``.
-    Filters (location, radius, sort) are applied in the browser UI — not via URL params.
-    Max price is enforced in Step 2, not in Marketplace UI.
-    """
+    """Path-only Marketplace entry URL (no filter query string)."""
     base = "https://www.facebook.com"
     if plan.marketplace_category_slug:
         return f"{base}/marketplace/category/{plan.marketplace_category_slug}/"
@@ -148,20 +117,24 @@ def build_marketplace_entry_url(plan: SearchPlan) -> str:
 
 
 def validate_search_plan_for_step1(plan: SearchPlan) -> None:
-    """
-    Real Playwright collection requires a non-empty location and at least one focused query term.
-    Prevents blank searches and empty ``query=`` navigation.
-    """
     if not (plan.location_text or "").strip():
         raise SearchPlanInvalidError(
             "Step 1 requires location_text to set Marketplace location/radius in the UI."
         )
-    queries = [q.strip() for q in plan.focused_queries if q and str(q).strip()]
-    if not queries:
-        raise SearchPlanInvalidError(
-            "Step 1 requires at least one focused product query term (from category keywords). "
-            "Add keywords in config/categories.json or choose a category with keywords."
-        )
+    if plan.search_mode == "custom_keywords":
+        qs = [q.strip() for q in plan.focused_queries if q and str(q).strip()]
+        if not qs:
+            raise SearchPlanInvalidError(
+                "Step 1 custom keyword mode requires at least one keyword phrase after normalization."
+            )
+    elif plan.search_mode == "marketplace_category":
+        if not (plan.marketplace_category_slug or "").strip():
+            raise SearchPlanInvalidError("Step 1 marketplace category mode requires a category slug.")
+    else:
+        raise SearchPlanInvalidError(f"Unknown search_mode={plan.search_mode!r}.")
+
+
+Step1CollectionMode = Literal["category_feed", "keyword_queries"]
 
 
 @dataclass
@@ -169,69 +142,71 @@ class SearchPlan:
     """Structured inputs for Step 1 Marketplace collection (logged + passed to the collector)."""
 
     user_id: int
-    category_id: str
+    search_mode: str
     location_text: str
     radius_miles: float
-    max_price: float
     sort_mode: str
     marketplace_category_slug: str | None
+    marketplace_category_label: str | None
     focused_queries: list[str]
-    raw_category_keywords: list[str] = field(default_factory=list)
-    general_pack_meta: dict[str, Any] = field(default_factory=dict)
+    step1_collection_mode: Step1CollectionMode
+    listing_category_ref: str
+    raw_custom_keywords: list[str] = field(default_factory=list)
 
     def to_log_dict(self) -> dict:
-        d = {
+        return {
             "user_id": self.user_id,
-            "category_id": self.category_id,
+            "search_mode": self.search_mode,
             "location_text": self.location_text,
             "radius_miles": round(self.radius_miles, 2),
-            "max_price": self.max_price,
             "sort_mode": self.sort_mode,
             "marketplace_category_slug": self.marketplace_category_slug,
+            "marketplace_category_label": self.marketplace_category_label,
             "focused_queries": list(self.focused_queries),
-            "raw_category_keywords": list(self.raw_category_keywords),
+            "step1_collection_mode": self.step1_collection_mode,
+            "listing_category_ref": self.listing_category_ref,
+            "raw_custom_keywords": list(self.raw_custom_keywords),
         }
-        if self.general_pack_meta:
-            d["general_profitable_pack"] = dict(self.general_pack_meta)
-        return d
 
 
 def build_search_plan(profile: UserSettingsRow) -> SearchPlan:
-    cid = str(profile.category_id or "").strip() or "general"
-    raw_kws = keywords_for_category(cid)
-    general_pack_meta: dict = {}
-    if cid == "general":
-        focused, general_pack_meta = select_general_search_queries_for_cycle(
-            user_id=int(profile.user_id)
-        )
-        if not focused:
-            focused = focused_queries_from_category_keywords(cid, raw_kws)
-            logger.warning(
-                "Step 1 general pack empty; fallback to categories.json keyword queries user_id=%s focused=%s",
-                int(profile.user_id),
-                list(focused),
-            )
-    else:
-        focused = focused_queries_from_category_keywords(cid, raw_kws)
-    logger.info(
-        "Step 1 search keywords user_id=%s category_id=%s raw_category_keywords=%s focused_queries=%s",
-        int(profile.user_id),
-        cid,
-        list(raw_kws),
-        list(focused),
-    )
+    sm = (profile.search_mode or "marketplace_category").strip()
     loc = (profile.location_text or "").strip()
     r_mi = _radius_km_to_miles(float(profile.radius_km))
-    slug = FB_MARKETPLACE_CATEGORY_SLUG.get(cid)
+
+    if sm == "custom_keywords":
+        raw_kws = list(profile.custom_keywords or [])
+        focused = focused_queries_from_custom_keywords(raw_kws)
+        slug = None
+        label = None
+        step1_mode: Step1CollectionMode = "keyword_queries"
+        listing_ref = "custom_keywords"
+    else:
+        raw_kws = []
+        slug = (profile.marketplace_category_slug or "").strip() or None
+        label = (profile.marketplace_category_label or "").strip() or None
+        focused = []
+        step1_mode = "category_feed"
+        listing_ref = slug or "marketplace"
+
+    logger.info(
+        "Step 1 search plan user_id=%s search_mode=%s step1_collection_mode=%s slug=%s focused_queries=%s",
+        int(profile.user_id),
+        sm,
+        step1_mode,
+        slug,
+        list(focused),
+    )
     return SearchPlan(
         user_id=int(profile.user_id),
-        category_id=cid,
+        search_mode=sm,
         location_text=loc,
         radius_miles=r_mi,
-        max_price=float(profile.max_price),
         sort_mode=DEFAULT_MARKETPLACE_SORT,
         marketplace_category_slug=slug,
+        marketplace_category_label=label,
         focused_queries=focused,
-        raw_category_keywords=list(raw_kws),
-        general_pack_meta=general_pack_meta,
+        step1_collection_mode=step1_mode,
+        listing_category_ref=listing_ref,
+        raw_custom_keywords=list(raw_kws),
     )

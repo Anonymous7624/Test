@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from app.domain import Listing, UserSettings as UserSettingsRow
+from app.services.marketplace_categories_service import label_for_slug
 
 
 class Token(BaseModel):
@@ -41,8 +42,10 @@ class UserSettingsOut(BaseModel):
     center_lon: float | None = None
     radius_km: float
     radius_miles: float
-    category_id: str
-    max_price: float
+    search_mode: Literal["marketplace_category", "custom_keywords"]
+    marketplace_category_label: str | None = None
+    marketplace_category_slug: str | None = None
+    custom_keywords: list[str] = Field(default_factory=list)
     telegram_bot_username: str
     telegram_chat_id: str | None
     telegram_connected: bool
@@ -68,14 +71,20 @@ def user_settings_out_from_row(row: UserSettingsRow) -> UserSettingsOut:
         and row.telegram_verify_expires_at > datetime.utcnow()
     )
     has_chat = bool((row.telegram_chat_id or "").strip())
+    slug = row.marketplace_category_slug
+    label = row.marketplace_category_label
+    if slug and not (label or "").strip():
+        label = label_for_slug(str(slug)) or str(slug)
     return UserSettingsOut(
         location_text=row.location_text,
         center_lat=row.center_lat,
         center_lon=row.center_lon,
         radius_km=float(row.radius_km),
         radius_miles=round(km_to_miles(float(row.radius_km)), 4),
-        category_id=row.category_id,
-        max_price=float(row.max_price),
+        search_mode=row.search_mode,  # type: ignore[arg-type]
+        marketplace_category_label=label,
+        marketplace_category_slug=slug,
+        custom_keywords=list(row.custom_keywords or []),
         telegram_bot_username=f"@{bot_u}",
         telegram_chat_id=row.telegram_chat_id,
         telegram_connected=bool(row.telegram_connected) or has_chat,
@@ -96,8 +105,10 @@ class UserSettingsUpdate(BaseModel):
     center_lon: float | None = None
     radius_km: float | None = Field(default=None, ge=0)
     radius_miles: float | None = Field(default=None, ge=0)
-    category_id: str | None = None
-    max_price: float | None = Field(default=None, ge=0)
+    search_mode: Literal["marketplace_category", "custom_keywords"] | None = None
+    marketplace_category_slug: str | None = None
+    marketplace_category_label: str | None = None
+    custom_keywords: list[str] | None = None
     telegram_chat_id: str | None = None
     geoapify_place_id: str | None = None
 

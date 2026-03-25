@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.domain import UserSettings as UserSettingsRow
-from app.services.categories_service import keywords_for_category
 
 from search_plan import SearchPlan, build_search_plan
 
@@ -20,13 +19,12 @@ class CollectionInputs:
     """Per active profile: everything Step 1 needs to run targeted collection."""
 
     user_id: int
-    category_id: str
+    listing_category_ref: str
     keywords: list[str]
     search_plan: SearchPlan
     location_text: str
     primary_search_location: str
     search_area_labels: list[str]
-    max_price: float
     center_lat: float | None
     center_lon: float | None
     radius_km: float
@@ -60,7 +58,6 @@ def _nearby_and_related_areas(profile: UserSettingsRow) -> list[str]:
 
 def build_collection_inputs(profile: UserSettingsRow) -> CollectionInputs:
     """Build targeted collection/search inputs for one monitoring profile."""
-    cid = str(profile.category_id or "").strip() or "general"
     plan = build_search_plan(profile)
     primary = build_search_location_hint(profile)
     areas = _nearby_and_related_areas(profile)
@@ -68,13 +65,12 @@ def build_collection_inputs(profile: UserSettingsRow) -> CollectionInputs:
     hint = f"within {r_km:g} km of {primary}" if primary else f"within {r_km:g} km"
     return CollectionInputs(
         user_id=profile.user_id,
-        category_id=cid,
+        listing_category_ref=plan.listing_category_ref,
         keywords=list(plan.focused_queries),
         search_plan=plan,
         location_text=(profile.location_text or "").strip(),
         primary_search_location=primary,
         search_area_labels=areas,
-        max_price=float(profile.max_price),
         center_lat=profile.center_lat,
         center_lon=profile.center_lon,
         radius_km=r_km,

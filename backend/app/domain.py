@@ -22,8 +22,10 @@ class UserSettings:
     geoapify_place_id: str | None
     boundary_context: dict | None
     radius_km: float
-    category_id: str
-    max_price: float
+    search_mode: str
+    marketplace_category_label: str | None
+    marketplace_category_slug: str | None
+    custom_keywords: list[str]
     telegram_chat_id: str | None
     telegram_connected: bool
     telegram_verify_code: str | None

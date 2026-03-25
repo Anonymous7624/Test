@@ -135,7 +135,7 @@ async def _parse_stub_page(
     stub_path: Path,
 ) -> list[RawListing]:
     uri = stub_path.as_uri()
-    target_cat = (collection_inputs.category_id or "general").strip()
+    target_cat = (collection_inputs.listing_category_ref or "marketplace").strip()
     out: list[RawListing] = []
 
     await page.goto(uri, wait_until="domcontentloaded")
@@ -206,7 +206,7 @@ async def _harvest_visible_marketplace_cards(
     )
     seen_href: set[str] = set()
     out: list[RawListing] = []
-    cat = (collection_inputs.category_id or "general").strip()
+    cat = (collection_inputs.listing_category_ref or "marketplace").strip()
     default_loc = (collection_inputs.primary_search_location or "Unknown").strip() or "Unknown"
 
     for link in links:
@@ -427,7 +427,7 @@ async def fetch_listings_playwright(
             raise
         logger.info(
             "Step 1 strategy user_id=%s: path-only Marketplace entry + UI filters (location, radius, "
-            "sort) then focused search-box queries — max price is Step 2 only; no ?maxPrice= URL params.",
+            "sort); category feed browse and/or keyword queries — no ?maxPrice= URL params.",
             plan.user_id,
         )
 
@@ -454,8 +454,6 @@ async def fetch_listings_playwright(
                     )
                     return out, {}
                 else:
-                    queries = [q.strip() for q in plan.focused_queries if q and str(q).strip()]
-                    n_q = len(queries)
                     total_cap = _int_env(
                         "WORKER_COLLECTOR_BATCH_CAP", 600 if backfill else 400
                     )
@@ -484,82 +482,116 @@ async def fetch_listings_playwright(
                     if ui_applied.get("degraded_mode"):
                         logger.warning(
                             "Step 1 collector degraded user_id=%s (advanced filters partial or skipped); "
-                            "continuing with focused queries.",
+                            "continuing collection.",
                             plan.user_id,
                         )
 
-                    for idx, fq in enumerate(queries):
-                        logger.info(
-                            "Step 1 focused query %s/%s user_id=%s term=%r per_query_cap=%s batch_cap=%s",
-                            idx + 1,
-                            n_q,
-                            plan.user_id,
-                            fq,
-                            per_query_cap,
-                            total_cap,
+                    if plan.step1_collection_mode == "category_feed":
+                        fq_label = (
+                            plan.marketplace_category_label
+                            or plan.marketplace_category_slug
+                            or "category"
                         )
-                        try:
-                            sub_meta = await run_focused_marketplace_query(page, fq)
-                            logger.info(
-                                "Step 1 focused query submit user_id=%s term=%r meta=%s",
-                                plan.user_id,
-                                fq,
-                                sub_meta,
-                            )
-                        except MarketplaceFilterError:
-                            logger.exception(
-                                "Focused query failed user_id=%s term=%r",
-                                plan.user_id,
-                                fq,
-                            )
-                            raise
+                        logger.info(
+                            "Step 1 category-feed browse user_id=%s label=%r (no search-box keyword blob)",
+                            plan.user_id,
+                            fq_label,
+                        )
                         batch, scroll_meta = await _collect_marketplace_feed_for_query(
                             page,
                             collection_inputs=collection_inputs,
-                            expected_query=fq,
-                            submission_meta=sub_meta,
-                            per_query_cap=per_query_cap,
+                            expected_query=f"(browse {fq_label})",
+                            submission_meta=None,
+                            per_query_cap=min(per_query_cap, total_cap),
                         )
                         logger.info(
-                            "Step 1 focused query %s/%s user_id=%s term=%r scroll_meta=%s",
-                            idx + 1,
-                            n_q,
-                            plan.user_id,
-                            fq,
+                            "Step 1 category feed scroll_meta=%s",
                             scroll_meta,
                         )
-                        cross_query_dedupe = 0
-                        added = 0
                         for r in batch:
                             dk = _raw_dedupe_key(r)
                             if dk in seen_keys:
-                                cross_query_dedupe += 1
                                 continue
                             seen_keys.add(dk)
                             merged.append(r)
-                            added += 1
                             if len(merged) >= total_cap:
                                 break
-                        if cross_query_dedupe:
+                        out = merged[:total_cap]
+                    else:
+                        queries = [q.strip() for q in plan.focused_queries if q and str(q).strip()]
+                        n_q = len(queries)
+                        for idx, fq in enumerate(queries):
                             logger.info(
-                                "Step 1 cross-query dedupe skipped user_id=%s term=%r count=%s",
+                                "Step 1 focused query %s/%s user_id=%s term=%r per_query_cap=%s batch_cap=%s",
+                                idx + 1,
+                                n_q,
                                 plan.user_id,
                                 fq,
-                                cross_query_dedupe,
+                                per_query_cap,
+                                total_cap,
                             )
-                        logger.info(
-                            "Step 1 focused query %s/%s user_id=%s term=%r new_unique_added=%s merged_total=%s",
-                            idx + 1,
-                            n_q,
-                            plan.user_id,
-                            fq,
-                            added,
-                            len(merged),
-                        )
-                        if len(merged) >= total_cap:
-                            break
-                    out = merged[:total_cap]
-                    collector_meta: dict = {
+                            try:
+                                sub_meta = await run_focused_marketplace_query(page, fq)
+                                logger.info(
+                                    "Step 1 focused query submit user_id=%s term=%r meta=%s",
+                                    plan.user_id,
+                                    fq,
+                                    sub_meta,
+                                )
+                            except MarketplaceFilterError:
+                                logger.exception(
+                                    "Focused query failed user_id=%s term=%r",
+                                    plan.user_id,
+                                    fq,
+                                )
+                                raise
+                            batch, scroll_meta = await _collect_marketplace_feed_for_query(
+                                page,
+                                collection_inputs=collection_inputs,
+                                expected_query=fq,
+                                submission_meta=sub_meta,
+                                per_query_cap=per_query_cap,
+                            )
+                            logger.info(
+                                "Step 1 focused query %s/%s user_id=%s term=%r scroll_meta=%s",
+                                idx + 1,
+                                n_q,
+                                plan.user_id,
+                                fq,
+                                scroll_meta,
+                            )
+                            cross_query_dedupe = 0
+                            added = 0
+                            for r in batch:
+                                dk = _raw_dedupe_key(r)
+                                if dk in seen_keys:
+                                    cross_query_dedupe += 1
+                                    continue
+                                seen_keys.add(dk)
+                                merged.append(r)
+                                added += 1
+                                if len(merged) >= total_cap:
+                                    break
+                            if cross_query_dedupe:
+                                logger.info(
+                                    "Step 1 cross-query dedupe skipped user_id=%s term=%r count=%s",
+                                    plan.user_id,
+                                    fq,
+                                    cross_query_dedupe,
+                                )
+                            logger.info(
+                                "Step 1 focused query %s/%s user_id=%s term=%r new_unique_added=%s merged_total=%s",
+                                idx + 1,
+                                n_q,
+                                plan.user_id,
+                                fq,
+                                added,
+                                len(merged),
+                            )
+                            if len(merged) >= total_cap:
+                                break
+                        out = merged[:total_cap]
+                    collector_meta = {
                         "degraded_mode": bool(ui_applied.get("degraded_mode")),
                         "worker_collector_warning": ui_applied.get("worker_collector_warning"),
                     }

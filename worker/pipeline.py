@@ -25,6 +25,7 @@ from candidate_models import CandidateListing
 from search_context import build_collection_inputs
 from step1_normalize import normalize_raw_to_candidate, prefilter_candidate
 from step2_matcher import strict_match
+from step2_pre_ai import pre_ai_should_score
 from mock_scraper import RawListing
 
 logger = logging.getLogger(__name__)
@@ -150,11 +151,19 @@ def process_batch(
                     step2_reason_counter[r] += 1
                 continue
 
-            step2_matched += 1
             c = result.candidate_for_ai
             if c is None:
                 continue
 
+            pre_ok, _pre_strength, _pre_rs = pre_ai_should_score(
+                c, profile, list(result.matched_keywords)
+            )
+            if not pre_ok:
+                step2_rejected += 1
+                step2_reason_counter["pre_ai_low_signal"] += 1
+                continue
+
+            step2_matched += 1
             norm = normalized_from_candidate(c)
             profile.worker_current_step = 3
             profile.worker_current_state = "step3_ai_scoring"
@@ -373,13 +382,16 @@ def process_batch(
             return "duplicate_detection"
         if reason in ("invalid_price", "non_positive_price"):
             return "bad_price"
-        if reason == "over_max_price":
-            return "price_too_high"
+        if reason == "pre_ai_low_signal":
+            return "pre_ai_gate"
         if reason == "location_outside_radius":
             return "location_mismatch"
         if reason in (
             "category_keyword_mismatch",
             "category_mismatch_no_keywords_configured",
+            "category_slug_mismatch",
+            "custom_keyword_no_match",
+            "unknown_search_mode",
         ):
             return "weak_keyword_or_category"
         return "other"
@@ -388,12 +400,12 @@ def process_batch(
     for r, n in step2_reason_counter.items():
         bucket_counts[_step2_rejection_bucket(r)] += n
     logger.info(
-        "Step 2 rejection buckets user_id=%s: duplicate_detection=%s bad_price=%s price_too_high=%s "
+        "Step 2 rejection buckets user_id=%s: duplicate_detection=%s bad_price=%s pre_ai_gate=%s "
         "location_mismatch=%s weak_keyword_or_category=%s other=%s (raw_reasons=%s)",
         profile.user_id,
         bucket_counts.get("duplicate_detection", 0),
         bucket_counts.get("bad_price", 0),
-        bucket_counts.get("price_too_high", 0),
+        bucket_counts.get("pre_ai_gate", 0),
         bucket_counts.get("location_mismatch", 0),
         bucket_counts.get("weak_keyword_or_category", 0),
         bucket_counts.get("other", 0),

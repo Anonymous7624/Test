@@ -40,8 +40,10 @@ export type UserSettings = {
   boundary_context: Record<string, unknown> | null;
   radius_km: number;
   radius_miles: number;
-  category_id: string;
-  max_price: number;
+  search_mode: "marketplace_category" | "custom_keywords";
+  marketplace_category_label: string | null;
+  marketplace_category_slug: string | null;
+  custom_keywords: string[];
   telegram_bot_username: string;
   telegram_chat_id: string | null;
   telegram_connected: boolean;
@@ -81,7 +83,7 @@ export type ListingRow = {
   alert_last_error?: string | null;
 };
 
-export type Category = { id: string; label: string; keywords: string[] };
+export type MarketplaceCategory = { slug: string; label: string };
 
 function headers(token: string | null, init?: HeadersInit): HeadersInit {
   const h: Record<string, string> = { "Content-Type": "application/json" };
@@ -162,10 +164,10 @@ export async function sendTelegramTest(token: string): Promise<{ ok: boolean; me
   return res.json() as Promise<{ ok: boolean; message: string }>;
 }
 
-export async function fetchCategories(): Promise<{ categories: Category[] }> {
+export async function fetchCategories(): Promise<{ categories: MarketplaceCategory[] }> {
   const res = await fetch(`${API_BASE}/categories`);
   if (!res.ok) throw new Error("Failed to load categories");
-  return res.json() as Promise<{ categories: Category[] }>;
+  return res.json() as Promise<{ categories: MarketplaceCategory[] }>;
 }
 
 export async function fetchListings(
