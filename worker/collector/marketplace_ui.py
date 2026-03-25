@@ -1,8 +1,10 @@
 """
 Facebook Marketplace: apply built-in filters via the logged-in web UI (Playwright async).
 
-Facebook changes markup frequently; selectors use roles/labels with fallbacks. Any failure in a
-required step raises a real error so the worker does not silently continue with a weak search.
+Facebook changes markup frequently; selectors use roles/labels with fallbacks. Location and radius
+are required for a meaningful search. The Filters drawer (max price, sort) is best-effort: if it
+cannot be opened or controls fail, the collector degrades gracefully and continues with focused
+queries using whatever filters Facebook already applied (e.g. location/radius, category path).
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Any
+from typing import Any, Callable
 
 from search_context import CollectionInputs
 from search_plan import (
@@ -23,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class MarketplaceFilterError(RuntimeError):
-    """Raised when a required Marketplace filter could not be applied in the UI."""
+    """Raised when a required Marketplace step could not be completed (e.g. location or search box)."""
 
 
 # US Marketplace radius options commonly seen in the location dialog (miles).
@@ -61,7 +63,7 @@ async def _wait_for_marketplace_shell(page) -> None:
         ) from exc
 
 
-async def _click_first_visible(page, locator, *, step: str, timeout: int = 15_000):
+async def _click_first_visible(page, locator, *, step: str, timeout: int = 15_000) -> None:
     loc = locator.first
     await loc.wait_for(state="visible", timeout=timeout)
     await loc.click()
@@ -92,7 +94,7 @@ async def _open_location_dialog(page, plan: SearchPlan) -> None:
             continue
     raise MarketplaceFilterError(
         f"Could not open Marketplace location / radius UI for {loc_text!r} (~{r_mi} mi). "
-        f"Last error: {last_exc}"
+        f"Last error: {last_exc!r}"
     ) from last_exc
 
 
@@ -185,23 +187,132 @@ async def _fill_location_and_radius_in_dialog(page, plan: SearchPlan) -> None:
     await page.wait_for_timeout(400)
 
 
-async def _open_filters_drawer(page) -> None:
-    last_exc: Exception | None = None
+async def _filters_panel_looks_open(page) -> bool:
+    """Heuristic: visible dialog that looks like Marketplace filters (not only location)."""
+    dialog = page.locator('[role="dialog"]').first
+    if await dialog.count() < 1:
+        return False
+    try:
+        await dialog.wait_for(state="visible", timeout=4000)
+    except Exception:
+        return False
     for loc in (
-        page.get_by_role("button", name=re.compile(r"^filters?$", re.I)),
-        page.get_by_role("tab", name=re.compile(r"filter", re.I)),
-        page.get_by_text(re.compile(r"^filters$", re.I)),
+        dialog.get_by_text(re.compile(r"\b(sort|price|max|condition|category|delivery)\b", re.I)),
+        dialog.get_by_label(re.compile(r"max", re.I)),
+        dialog.locator('input[inputmode="numeric"]'),
+        dialog.get_by_role("combobox", name=re.compile(r"sort", re.I)),
     ):
         try:
-            if await loc.count() < 1:
-                continue
-            await _click_first_visible(page, loc, step="Filters")
-            await page.wait_for_timeout(600)
-            return
-        except Exception as exc:
-            last_exc = exc
+            if await loc.count() > 0:
+                return True
+        except Exception:
             continue
-    raise MarketplaceFilterError(f"Could not open Filters drawer. Last error: {last_exc}") from last_exc
+    return False
+
+
+def _iter_filters_open_locators(page) -> list[tuple[str, Callable[[], Any]]]:
+    """Named selector strategies for opening the Filters UI (order matters: try specific first)."""
+    return [
+        (
+            "role_button_name_anchors_filters",
+            lambda: page.get_by_role("button", name=re.compile(r"^filters?$", re.I)),
+        ),
+        (
+            "role_button_name_contains_filter",
+            lambda: page.get_by_role("button", name=re.compile(r"filter", re.I)),
+        ),
+        ("role_tab_filter", lambda: page.get_by_role("tab", name=re.compile(r"filter", re.I))),
+        (
+            "aria_label_filter",
+            lambda: page.locator("[aria-label*='Filter' i], [aria-label*='filter' i]").first,
+        ),
+        (
+            "text_filters_exact_line",
+            lambda: page.get_by_text(re.compile(r"^filters?$", re.I)),
+        ),
+        (
+            "div_role_button_filter_text",
+            lambda: page.locator('div[role="button"]').filter(
+                has_text=re.compile(r"filters?", re.I)
+            ),
+        ),
+        (
+            "header_toolbar_filter",
+            lambda: page.locator('header button, [role="banner"] button').filter(
+                has_text=re.compile(r"filter", re.I)
+            ),
+        ),
+    ]
+
+
+async def _try_open_filters_drawer(page) -> dict[str, Any]:
+    """
+    Try to open the Filters drawer/panel. Does not raise.
+
+    Returns keys: opened, already_visible, selector_used, attempt_log (list[str]).
+    """
+    attempt_log: list[str] = []
+
+    if await _filters_panel_looks_open(page):
+        logger.info(
+            "Marketplace UI: Filters panel already visible (skipping open click)"
+        )
+        return {
+            "opened": False,
+            "already_visible": True,
+            "selector_used": None,
+            "attempt_log": ["already_visible: dialog matched filters heuristics"],
+        }
+
+    selector_used: str | None = None
+    for name, factory in _iter_filters_open_locators(page):
+        loc = factory()
+        try:
+            n = await loc.count()
+            if n < 1:
+                attempt_log.append(f"{name}: no elements matched (count=0)")
+                continue
+        except Exception as exc:
+            attempt_log.append(f"{name}: count() failed: {type(exc).__name__}: {exc!r}")
+            continue
+        try:
+            await _click_first_visible(page, loc, step=f"Filters ({name})")
+            await page.wait_for_timeout(700)
+            if await _filters_panel_looks_open(page):
+                selector_used = name
+                logger.info(
+                    "Marketplace UI: Filters drawer opened via selector=%s",
+                    name,
+                )
+                return {
+                    "opened": True,
+                    "already_visible": False,
+                    "selector_used": name,
+                    "attempt_log": attempt_log + [f"{name}: click succeeded; panel visible"],
+                }
+            attempt_log.append(
+                f"{name}: clicked but filters panel heuristics not visible afterward"
+            )
+        except Exception as exc:
+            attempt_log.append(f"{name}: {type(exc).__name__}: {exc!r}")
+
+    # Nothing worked: summarize (never None-only "Last error")
+    summary = (
+        "; ".join(attempt_log)
+        if attempt_log
+        else "internal: no selector entries produced attempt_log (unexpected)"
+    )
+    logger.warning(
+        "Marketplace UI: could not open Filters drawer; attempts=%s",
+        summary[:1200],
+    )
+    return {
+        "opened": False,
+        "already_visible": False,
+        "selector_used": None,
+        "attempt_log": attempt_log,
+        "failure_summary": summary,
+    }
 
 
 async def _set_max_price_in_filters(page, plan: SearchPlan) -> None:
@@ -311,7 +422,7 @@ async def run_focused_marketplace_query(page, query: str) -> None:
             last_exc = exc
             continue
     raise MarketplaceFilterError(
-        f"Could not run focused query {q!r} (search input not found). Last: {last_exc}"
+        f"Could not run focused query {q!r} (search input not found). Last: {last_exc!r}"
     ) from last_exc
 
 
@@ -344,28 +455,123 @@ async def apply_marketplace_filters_ui(
         "max_price_cap": int(max(0, min(plan.max_price, 1_000_000))),
         "sort_mode": plan.sort_mode,
         "sort_ui_label": _sort_label_for_plan(plan),
+        "location_radius_ok": False,
+        "filters_drawer_opened": False,
+        "filters_drawer_already_visible": False,
+        "filters_drawer_selector": None,
+        "max_price_ui": "not_attempted",
+        "sort_ui": "not_attempted",
+        "filters_confirmed": False,
+        "degraded_mode": False,
+        "worker_collector_warning": None,
     }
 
-    # Location + radius (required).
+    # Location + radius (required for meaningful geo-scoped search).
     await _open_location_dialog(page, plan)
     await _fill_location_and_radius_in_dialog(page, plan)
     applied["location_radius_ui"] = "applied"
+    applied["location_radius_ok"] = True
     logger.info(
-        "Marketplace UI: location/radius applied user_id=%s primary=%r snapped=%s mi",
+        "Marketplace UI: location/radius OK user_id=%s primary=%r snapped=%s mi",
         plan.user_id,
         collection_inputs.primary_search_location,
         applied["radius_miles_snapped"],
     )
 
-    # Price + sort (Filters drawer).
-    await _open_filters_drawer(page)
-    await _set_max_price_in_filters(page, plan)
-    applied["max_price_ui"] = "applied"
-    await _set_sort_in_filters(page, plan)
-    applied["sort_ui"] = "applied"
-    await _apply_filters_confirm(page)
-    applied["filters_confirmed"] = True
+    # Price + sort (Filters drawer) — best-effort.
+    drawer_info = await _try_open_filters_drawer(page)
+    applied["filters_drawer_opened"] = bool(
+        drawer_info.get("opened") or drawer_info.get("already_visible")
+    )
+    applied["filters_drawer_already_visible"] = bool(drawer_info.get("already_visible"))
+    applied["filters_drawer_selector"] = drawer_info.get("selector_used")
+    applied["filters_drawer_attempts"] = drawer_info.get("attempt_log", [])
 
+    if not applied["filters_drawer_opened"]:
+        applied["degraded_mode"] = True
+        applied["max_price_ui"] = "skipped_no_drawer"
+        applied["sort_ui"] = "skipped_no_drawer"
+        fs = drawer_info.get("failure_summary") or (
+            "; ".join(drawer_info.get("attempt_log") or []) or "unknown"
+        )
+        applied["worker_collector_warning"] = (
+            "Advanced Marketplace filters (max price, sort) were skipped: Filters drawer did not open. "
+            f"Details: {fs[:400]}"
+        )
+        logger.warning(
+            "Marketplace UI: degraded mode user_id=%s — continuing with location/radius + category entry only. %s",
+            plan.user_id,
+            applied["worker_collector_warning"][:500],
+        )
+    else:
+        # Max price
+        try:
+            await _set_max_price_in_filters(page, plan)
+            applied["max_price_ui"] = "applied"
+            logger.info(
+                "Marketplace UI: max price applied user_id=%s cap=%s",
+                plan.user_id,
+                applied["max_price_cap"],
+            )
+        except Exception as exc:
+            applied["max_price_ui"] = f"skipped: {type(exc).__name__}: {exc!r}"
+            applied["degraded_mode"] = True
+            logger.warning(
+                "Marketplace UI: max price not applied user_id=%s: %s",
+                plan.user_id,
+                exc,
+                exc_info=True,
+            )
+
+        # Sort
+        try:
+            await _set_sort_in_filters(page, plan)
+            applied["sort_ui"] = "applied"
+        except Exception as exc:
+            applied["sort_ui"] = f"skipped: {type(exc).__name__}: {exc!r}"
+            applied["degraded_mode"] = True
+            logger.warning(
+                "Marketplace UI: sort not applied user_id=%s: %s",
+                plan.user_id,
+                exc,
+                exc_info=True,
+            )
+
+        # Confirm / apply filters panel
+        try:
+            await _apply_filters_confirm(page)
+            applied["filters_confirmed"] = True
+        except Exception as exc:
+            applied["filters_confirmed"] = False
+            applied["degraded_mode"] = True
+            logger.warning(
+                "Marketplace UI: Filters confirm failed user_id=%s: %s",
+                plan.user_id,
+                exc,
+                exc_info=True,
+            )
+
+        if applied["degraded_mode"] and not applied.get("worker_collector_warning"):
+            applied["worker_collector_warning"] = (
+                "Some advanced Marketplace filters could not be fully applied (max price, sort, and/or confirm). "
+                "Search uses location/radius and category; results may be broader than configured."
+            )
+            logger.warning(
+                "Marketplace UI: degraded mode user_id=%s — partial advanced filters",
+                plan.user_id,
+            )
+
+    logger.info(
+        "Marketplace UI: filter cycle summary user_id=%s location_radius_ok=%s drawer_open=%s "
+        "degraded=%s max_price=%s sort=%s confirmed=%s",
+        plan.user_id,
+        applied["location_radius_ok"],
+        applied["filters_drawer_opened"],
+        applied["degraded_mode"],
+        applied["max_price_ui"],
+        applied["sort_ui"],
+        applied["filters_confirmed"],
+    )
     logger.info(
         "Marketplace UI: filters applied user_id=%s: %s",
         plan.user_id,

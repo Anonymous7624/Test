@@ -235,6 +235,8 @@ export type WorkerStatusPayload = {
   pipeline_error?: string | null;
   pipeline_counts?: PipelineCountsPayload | null;
   admin_pipeline_snapshot?: Record<string, unknown> | null;
+  /** Marketplace UI advanced filters skipped or partial; search may be broader than settings. */
+  collector_warning?: string | null;
   /** Set by client when status could not be loaded (never thrown). */
   status_fetch_error?: string;
 };

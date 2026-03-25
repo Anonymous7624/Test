@@ -48,27 +48,32 @@ def _mock_collector_enabled() -> bool:
     )
 
 
-async def _collect_raws(profile: UserSettingsRow, *, backfill: bool) -> list[RawListing]:
+async def _collect_raws(
+    profile: UserSettingsRow, *, backfill: bool
+) -> tuple[list[RawListing], dict]:
+    """Returns (raw listings, collector metadata e.g. degraded UI mode)."""
     inputs = build_collection_inputs(profile)
     if _mock_collector_enabled():
         logger.warning(
             "Using MOCK collector (WORKER_MOCK_COLLECTOR is set); no Playwright / Facebook."
         )
         if backfill:
-            return mock_fetch_backfill(
+            raws = mock_fetch_backfill(
                 category_slug=inputs.category_id,
                 location=inputs.primary_search_location,
                 max_price=inputs.max_price,
                 keywords=inputs.keywords,
                 search_area_labels=inputs.search_area_labels,
             )
-        return mock_fetch_batch(
-            category_slug=inputs.category_id,
-            location=inputs.primary_search_location,
-            max_price=inputs.max_price,
-            keywords=inputs.keywords,
-            search_area_labels=inputs.search_area_labels,
-        )
+        else:
+            raws = mock_fetch_batch(
+                category_slug=inputs.category_id,
+                location=inputs.primary_search_location,
+                max_price=inputs.max_price,
+                keywords=inputs.keywords,
+                search_area_labels=inputs.search_area_labels,
+            )
+        return raws, {}
 
     try:
         return await fetch_listings_playwright(collection_inputs=inputs, backfill=backfill)
@@ -91,12 +96,25 @@ def _begin_listing_collection(repo: UserRepository, s: UserSettingsRow, now: dat
     s.worker_current_state = "collecting_listings"
     s.worker_pipeline_message = "Step 1: Looking for listings"
     s.worker_pipeline_error = None
+    s.worker_collector_warning = None
     repo.replace_settings(s)
 
 
-def _after_listing_collection(repo: UserRepository, s: UserSettingsRow, raws: list[RawListing]) -> None:
+def _after_listing_collection(
+    repo: UserRepository,
+    s: UserSettingsRow,
+    raws: list[RawListing],
+    *,
+    collector_meta: dict | None = None,
+) -> None:
     s.worker_count_raw_collected = len(raws)
-    s.worker_pipeline_message = f"Step 1: {len(raws)} listings found"
+    meta = collector_meta or {}
+    msg = f"Step 1: {len(raws)} listings found"
+    if meta.get("degraded_mode"):
+        msg += " — degraded (some Marketplace UI filters skipped)"
+    s.worker_pipeline_message = msg
+    warn = meta.get("worker_collector_warning")
+    s.worker_collector_warning = (str(warn)[:500] if warn else None)
     repo.replace_settings(s)
 
 
@@ -113,14 +131,14 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
         repo.replace_settings(s)
         _begin_listing_collection(repo, s, now)
         try:
-            raws = await _collect_raws(s, backfill=True)
+            raws, collector_meta = await _collect_raws(s, backfill=True)
         except Exception as exc:
             s.worker_current_state = "collector_error"
             s.worker_pipeline_error = str(exc)[:500]
             s.worker_pipeline_message = "Step 1: Collector failed"
             repo.replace_settings(s)
             raise
-        _after_listing_collection(repo, s, raws)
+        _after_listing_collection(repo, s, raws, collector_meta=collector_meta)
         if raws:
             stats = process_batch(db, raws, profile=s, origin_type="backfill")
             print(
@@ -143,14 +161,14 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
     repo.replace_settings(s)
     _begin_listing_collection(repo, s, now)
     try:
-        raws = await _collect_raws(s, backfill=False)
+        raws, collector_meta = await _collect_raws(s, backfill=False)
     except Exception as exc:
         s.worker_current_state = "collector_error"
         s.worker_pipeline_error = str(exc)[:500]
         s.worker_pipeline_message = "Step 1: Collector failed"
         repo.replace_settings(s)
         raise
-    _after_listing_collection(repo, s, raws)
+    _after_listing_collection(repo, s, raws, collector_meta=collector_meta)
     if raws:
         stats = process_batch(db, raws, profile=s, origin_type="live")
         print(

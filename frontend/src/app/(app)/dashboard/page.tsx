@@ -104,6 +104,11 @@ export default function DashboardPage() {
           {worker?.pipeline_error ? (
             <p className="mt-2 text-xs text-red-300/95">Pipeline: {worker.pipeline_error}</p>
           ) : null}
+          {worker?.collector_warning ? (
+            <p className="mt-2 rounded-md border border-amber-800/60 bg-amber-950/30 px-2 py-1.5 text-xs text-amber-100/95">
+              Collector: {worker.collector_warning}
+            </p>
+          ) : null}
         </div>
 
         <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">

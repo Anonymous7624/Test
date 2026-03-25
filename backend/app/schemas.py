@@ -218,6 +218,7 @@ class WorkerStatus(BaseModel):
     pipeline_error: str | None = None
     pipeline_counts: PipelineCountsOut | None = None
     admin_pipeline_snapshot: dict | None = None
+    collector_warning: str | None = None
 
 
 class TelegramVerificationStart(BaseModel):

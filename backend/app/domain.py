@@ -46,6 +46,8 @@ class UserSettings:
     worker_count_step4_saved: int = 0
     worker_count_alerts_sent: int = 0
     worker_pipeline_error: str | None = None
+    # Set when Step 1 completes but Marketplace advanced UI filters were skipped (e.g. Filters drawer).
+    worker_collector_warning: str | None = None
 
 
 @dataclass

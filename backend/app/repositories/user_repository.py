@@ -40,6 +40,7 @@ def _default_settings_doc(user_id: int) -> dict:
         "worker_count_step4_saved": 0,
         "worker_count_alerts_sent": 0,
         "worker_pipeline_error": None,
+        "worker_collector_warning": None,
     }
 
 
@@ -85,6 +86,7 @@ def settings_from_doc(doc: dict) -> UserSettingsState:
         worker_count_step4_saved=int(doc.get("worker_count_step4_saved", 0)),
         worker_count_alerts_sent=int(doc.get("worker_count_alerts_sent", 0)),
         worker_pipeline_error=doc.get("worker_pipeline_error"),
+        worker_collector_warning=doc.get("worker_collector_warning"),
     )
 
 

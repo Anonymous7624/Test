@@ -233,9 +233,12 @@ async def fetch_listings_playwright(
     *,
     collection_inputs: CollectionInputs,
     backfill: bool,
-) -> list[RawListing]:
+) -> tuple[list[RawListing], dict]:
     """
     Collect listings: real Marketplace via UI filters + focused queries by default, or local stub.
+
+    Returns ``(listings, collector_meta)``. ``collector_meta`` is empty for the stub; for Facebook it
+    may include ``degraded_mode`` and ``worker_collector_warning`` for the worker status API.
     """
     try:
         from playwright.async_api import async_playwright
@@ -303,6 +306,12 @@ async def fetch_listings_playwright(
                         backfill=backfill,
                         stub_path=stub_path,
                     )
+                    logger.info(
+                        "Listings found: %s (source=%s)",
+                        len(out),
+                        "playwright_stub",
+                    )
+                    return out, {}
                 else:
                     queries = [q.strip() for q in plan.focused_queries if q and str(q).strip()]
                     n_q = len(queries)
@@ -329,6 +338,12 @@ async def fetch_listings_playwright(
                         plan.user_id,
                         ui_applied,
                     )
+                    if ui_applied.get("degraded_mode"):
+                        logger.warning(
+                            "Step 1 collector degraded user_id=%s (advanced filters partial or skipped); "
+                            "continuing with focused queries.",
+                            plan.user_id,
+                        )
 
                     for idx, fq in enumerate(queries):
                         logger.info(
@@ -373,6 +388,10 @@ async def fetch_listings_playwright(
                         if len(merged) >= total_cap:
                             break
                     out = merged[:total_cap]
+                    collector_meta: dict = {
+                        "degraded_mode": bool(ui_applied.get("degraded_mode")),
+                        "worker_collector_warning": ui_applied.get("worker_collector_warning"),
+                    }
                 logger.info(
                     "Listings found: %s (source=%s)",
                     len(out),
@@ -383,7 +402,7 @@ async def fetch_listings_playwright(
                         "No listings parsed from Marketplace HTML — check auth state, "
                         "UI filter selectors, search results, or DOM changes."
                     )
-                return out
+                return out, collector_meta
             finally:
                 await context.close()
         finally:
