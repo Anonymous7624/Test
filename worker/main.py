@@ -29,6 +29,7 @@ from app.database import get_database  # noqa: E402
 from app.domain import UserSettings as UserSettingsRow  # noqa: E402
 from app.mongodb import ensure_indexes  # noqa: E402
 from app.repositories.user_repository import UserRepository, settings_from_doc  # noqa: E402
+from collector.errors import CollectorInterruptedError  # noqa: E402
 from collector.playwright_collector import (  # noqa: E402
     FacebookAuthStateMissingError,
     fetch_listings_playwright,
@@ -77,6 +78,8 @@ async def _collect_raws(
         return await fetch_listings_playwright(collection_inputs=inputs, backfill=backfill)
     except FacebookAuthStateMissingError:
         raise
+    except CollectorInterruptedError:
+        raise
     except Exception as exc:
         logger.exception(
             "Playwright collector failed (user_id=%s backfill=%s): %s",
@@ -115,6 +118,29 @@ def _begin_listing_collection(
     repo.replace_settings(s)
     logger.info(
         "Batch started: user_id=%s backfill=%s stage=collect_listings",
+        s.user_id,
+        backfill,
+    )
+
+
+def _persist_batch_interrupted(
+    repo: UserRepository,
+    s: UserSettingsRow,
+    now: datetime,
+    *,
+    backfill: bool,
+) -> None:
+    """Manual stop / cancellation / browser closed — not a fatal collector failure."""
+    s.worker_current_state = "batch_interrupted"
+    s.worker_pipeline_message = "Step 1: Interrupted (collection stopped)"
+    s.worker_pipeline_error = None
+    s.worker_last_collector_failure_at = None
+    s.worker_last_collector_failure_message = None
+    s.last_error = None
+    s.last_checked_at = now
+    repo.replace_settings(s)
+    logger.info(
+        "Batch interrupted: user_id=%s backfill=%s (no collector_error recorded)",
         s.user_id,
         backfill,
     )
@@ -168,6 +194,15 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
         _begin_listing_collection(repo, s, now, backfill=True)
         try:
             raws, collector_meta = await _collect_raws(s, backfill=True)
+        except CollectorInterruptedError:
+            _persist_batch_interrupted(repo, s, now, backfill=True)
+            return
+        except asyncio.CancelledError:
+            _persist_batch_interrupted(repo, s, now, backfill=True)
+            raise
+        except KeyboardInterrupt:
+            _persist_batch_interrupted(repo, s, now, backfill=True)
+            raise
         except Exception as exc:
             s.worker_current_state = "collector_error"
             s.worker_pipeline_error = str(exc)[:500]
@@ -216,6 +251,15 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
     _begin_listing_collection(repo, s, now, backfill=False)
     try:
         raws, collector_meta = await _collect_raws(s, backfill=False)
+    except CollectorInterruptedError:
+        _persist_batch_interrupted(repo, s, now, backfill=False)
+        return
+    except asyncio.CancelledError:
+        _persist_batch_interrupted(repo, s, now, backfill=False)
+        raise
+    except KeyboardInterrupt:
+        _persist_batch_interrupted(repo, s, now, backfill=False)
+        raise
     except Exception as exc:
         s.worker_current_state = "collector_error"
         s.worker_pipeline_error = str(exc)[:500]

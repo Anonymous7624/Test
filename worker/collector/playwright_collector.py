@@ -13,6 +13,7 @@ Modes:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -23,6 +24,7 @@ from mock_scraper import RawListing
 from search_context import CollectionInputs
 from search_plan import SearchPlanInvalidError, validate_search_plan_for_step1
 
+from .errors import CollectorInterruptedError
 from .marketplace_dom import (
     log_no_results_diagnostics,
     query_all_item_links_with_strategy,
@@ -38,6 +40,27 @@ from .marketplace_ui import (
 logger = logging.getLogger(__name__)
 
 
+def _is_benign_playwright_close_error(exc: BaseException) -> bool:
+    """True when teardown hit an already-closed handle (idempotent close)."""
+    try:
+        from playwright._impl._errors import (  # noqa: PLC0415 — after playwright import in fetch
+            is_target_closed_error,
+        )
+
+        if isinstance(exc, Exception) and is_target_closed_error(exc):
+            return True
+    except Exception:
+        pass
+    msg = str(exc).lower()
+    return (
+        "has been closed" in msg
+        or "target closed" in msg
+        or "browser has been closed" in msg
+        or "context has been closed" in msg
+        or "connection closed" in msg
+    )
+
+
 async def _safe_close_playwright(label: str, close_coro) -> None:
     """
     Close a Playwright handle without turning teardown into a fatal fetch error.
@@ -47,26 +70,51 @@ async def _safe_close_playwright(label: str, close_coro) -> None:
     """
     try:
         await close_coro
-    except Exception as exc:  # noqa: BLE001 — teardown must not fail the batch
-        msg = str(exc).lower()
-        benign = (
-            "has been closed" in msg
-            or "target closed" in msg
-            or "browser has been closed" in msg
-            or "context has been closed" in msg
-        )
-        if benign:
+    except BaseException as exc:
+        if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+            raise
+        if _is_benign_playwright_close_error(exc):
             logger.warning(
                 "Playwright cleanup: %s already closed or gone (ignored): %s",
                 label,
                 exc,
             )
-        else:
+            return
+        if isinstance(exc, Exception):
             logger.warning(
                 "Playwright cleanup: %s close raised (ignored): %s",
                 label,
                 exc,
             )
+            return
+        raise
+
+
+async def _teardown_playwright_session(
+    *,
+    browser,
+    context,
+    page,
+    user_id: str | None,
+    use_stub: bool,
+) -> None:
+    """Idempotent page → context → browser teardown; logs start and completion."""
+    logger.info(
+        "Playwright cleanup started (user_id=%s stub=%s)",
+        user_id,
+        use_stub,
+    )
+    if page is not None and not page.is_closed():
+        await _safe_close_playwright("page", page.close())
+    if context is not None:
+        await _safe_close_playwright("context", context.close())
+    if browser is not None and browser.is_connected():
+        await _safe_close_playwright("browser", browser.close())
+    logger.info(
+        "Playwright cleanup completed safely (user_id=%s stub=%s)",
+        user_id,
+        use_stub,
+    )
 
 
 def _int_env(name: str, default: int) -> int:
@@ -414,6 +462,7 @@ async def fetch_listings_playwright(
     """
     try:
         from playwright.async_api import async_playwright
+        from playwright._impl._errors import TargetClosedError
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("playwright is not installed") from exc
 
@@ -639,14 +688,46 @@ async def fetch_listings_playwright(
                             "UI filter selectors, search results, or DOM changes."
                         )
                     return out, collector_meta
-        finally:
-            if page is not None:
-                await _safe_close_playwright("page", page.close())
-            if context is not None:
-                await _safe_close_playwright("context", context.close())
-            await _safe_close_playwright("browser", browser.close())
+        except asyncio.CancelledError:
             logger.info(
-                "Playwright cleanup completed safely (user_id=%s stub=%s)",
+                "Playwright collector: task cancelled during fetch (user_id=%s stub=%s)",
                 collection_inputs.user_id,
                 use_stub,
             )
+            raise
+        except Exception as exc:
+            if isinstance(exc, TargetClosedError):
+                logger.info(
+                    "Playwright collector: target closed during fetch (user_id=%s stub=%s)",
+                    collection_inputs.user_id,
+                    use_stub,
+                )
+                raise CollectorInterruptedError(
+                    "Browser or context closed during collection"
+                ) from exc
+            raise
+        finally:
+            try:
+                await asyncio.shield(
+                    _teardown_playwright_session(
+                        browser=browser,
+                        context=context,
+                        page=page,
+                        user_id=collection_inputs.user_id,
+                        use_stub=use_stub,
+                    )
+                )
+            except asyncio.CancelledError:
+                logger.warning(
+                    "Playwright cleanup: cancellation during shielded teardown; "
+                    "best-effort close (user_id=%s)",
+                    collection_inputs.user_id,
+                )
+                await _teardown_playwright_session(
+                    browser=browser,
+                    context=context,
+                    page=page,
+                    user_id=collection_inputs.user_id,
+                    use_stub=use_stub,
+                )
+                raise

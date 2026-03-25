@@ -10,6 +10,8 @@ import logging
 import re
 from typing import Any
 
+from .errors import CollectorInterruptedError
+
 logger = logging.getLogger(__name__)
 
 # Ordered: try specific anchors first, then broader patterns.
@@ -67,6 +69,23 @@ def url_looks_like_marketplace_search(url: str) -> bool:
     return "search" in u or "query=" in u
 
 
+def _reraise_if_target_closed(exc: BaseException) -> None:
+    """Stop locator noise during shutdown: pending waits fail with TargetClosedError."""
+    try:
+        from playwright._impl._errors import (  # noqa: PLC0415
+            is_target_closed_error,
+        )
+    except Exception:
+        return
+    if isinstance(exc, Exception) and is_target_closed_error(exc):
+        logger.info(
+            "Marketplace wait: target closed while waiting for item links (shutdown or browser closed)"
+        )
+        raise CollectorInterruptedError(
+            "Browser context closed during item-link wait"
+        ) from exc
+
+
 async def wait_for_any_item_link(
     page,
     *,
@@ -90,14 +109,16 @@ async def wait_for_any_item_link(
                 timeout=int(min(per, remaining * 1000)),
                 state="attached",
             )
-        except Exception:
+        except Exception as exc:
+            _reraise_if_target_closed(exc)
             continue
         try:
             els = await page.query_selector_all(sel)
             n = len(els)
             if n:
                 return name, n
-        except Exception:
+        except Exception as exc:
+            _reraise_if_target_closed(exc)
             continue
 
     # Full timeout on primary anchor (common case)
@@ -111,8 +132,8 @@ async def wait_for_any_item_link(
             els = await page.query_selector_all(sel)
             if els:
                 return name, len(els)
-        except Exception:
-            pass
+        except Exception as exc:
+            _reraise_if_target_closed(exc)
     return None, 0
 
 
@@ -126,7 +147,8 @@ async def query_all_item_links_with_strategy(
     for name, sel in all_strategies:
         try:
             els = await page.query_selector_all(sel)
-        except Exception:
+        except Exception as exc:
+            _reraise_if_target_closed(exc)
             continue
         if els:
             return name, els
