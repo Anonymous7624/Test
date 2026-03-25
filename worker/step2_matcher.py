@@ -87,7 +87,7 @@ def strict_match(
     raw_like = RawListing(
         title=candidate.title,
         price=candidate.price,
-        location=candidate.location,
+        location=candidate.location_text,
         category_slug=candidate.category_slug,
         source_link=candidate.source_link,
         source=candidate.source,

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 
 from app.domain import UserSettings as UserSettingsRow
@@ -135,6 +135,11 @@ def process_batch(
     )
     _flush_pipeline(db, profile)
 
+    logger.debug(
+        "Step 2 batch input: CandidateListing field names (Step 1 → Step 2 contract)=%s",
+        tuple(f.name for f in fields(CandidateListing)),
+    )
+
     repo = ListingRepository(db)
     step2_matched = 0
     step2_rejected = 0
@@ -142,6 +147,7 @@ def process_batch(
     step3_scored = 0
     step4_saved = 0
     alerts_sent = 0
+    pipeline_candidate_errors: Counter[str] = Counter()
 
     for cand in candidates:
         try:
@@ -336,8 +342,20 @@ def process_batch(
                     )
 
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Pipeline failed for one candidate: %s", exc)
-            print(f"[user={profile.user_id}] pipeline: candidate error (continuing): {exc}", flush=True)
+            err_key = f"{type(exc).__name__}:{str(exc)[:160]}"
+            pipeline_candidate_errors[err_key] += 1
+            if pipeline_candidate_errors[err_key] == 1:
+                logger.exception("Pipeline failed for one candidate: %s", exc)
+                print(
+                    f"[user={profile.user_id}] pipeline: candidate error (continuing): {exc}",
+                    flush=True,
+                )
+            else:
+                logger.debug(
+                    "Pipeline candidate error (repeat %s for same pattern): %s",
+                    pipeline_candidate_errors[err_key],
+                    exc,
+                )
             continue
 
     stats = PipelineBatchResult(
@@ -359,6 +377,13 @@ def process_batch(
     profile.worker_current_step = 0
     profile.worker_current_state = "batch_complete"
     profile.worker_last_success_at = datetime.utcnow()
+    if pipeline_candidate_errors:
+        logger.warning(
+            "Pipeline batch: %d candidate-level exception(s) across %d unique error pattern(s): %s",
+            sum(pipeline_candidate_errors.values()),
+            len(pipeline_candidate_errors),
+            dict(pipeline_candidate_errors),
+        )
     # Batch finished without aborting — clear any per-item step errors so the site does not
     # show stale "AI scoring failed" / "Save listing failed" after a successful completion.
     profile.worker_pipeline_error = None
