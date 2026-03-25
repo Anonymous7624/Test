@@ -33,6 +33,7 @@ def normalize_raw_to_candidate(
         "collector_category_slug": raw.category_slug,
         "profile_search_mode": str(profile.search_mode or "").strip(),
         "profile_marketplace_category_slug": profile.marketplace_category_slug,
+        "listing_location_parsed": getattr(raw, "listing_location_parsed", None),
         "collection": {
             "listing_category_ref": collection_inputs.listing_category_ref,
             "keywords": list(collection_inputs.keywords),

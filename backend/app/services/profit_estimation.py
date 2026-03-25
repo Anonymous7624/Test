@@ -13,11 +13,10 @@ class ProfitEstimate:
 
 
 def estimate_profit(asking_price: float, category_slug: str) -> ProfitEstimate:
-    # Mock multipliers: electronics slightly higher assumed margin
+    # Mock multipliers: electronics slightly higher assumed margin (heuristic resale only).
     bump = {"electronics": 1.45, "vehicles": 1.15}.get(category_slug, 1.35)
-    fees_and_hassle = max(15.0, asking_price * 0.08)
     estimated_resale = round(asking_price * bump, 2)
-    estimated_profit = round(estimated_resale - asking_price - fees_and_hassle, 2)
+    estimated_profit = round(estimated_resale - asking_price, 2)
     return ProfitEstimate(
         estimated_resale=estimated_resale,
         estimated_profit=estimated_profit,

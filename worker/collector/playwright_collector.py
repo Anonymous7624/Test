@@ -205,6 +205,97 @@ def _title_from_card_text(text: str) -> str:
     return cleaned.split("\n")[0][:500] if cleaned else ""
 
 
+_MI_DIST_ONLY = re.compile(
+    r"^\s*\d+\s*(mi|miles|km|m)\s*$",
+    re.I,
+)
+
+
+def _line_looks_like_location(line: str) -> bool:
+    s = (line or "").strip()
+    if len(s) < 3 or len(s) > 120:
+        return False
+    if s.startswith("$"):
+        return False
+    if _extract_price(s) is not None and "$" in s:
+        return False
+    if _MI_DIST_ONLY.match(s):
+        return False
+    return bool(re.search(r"[A-Za-z]{2,}", s))
+
+
+def _split_location_from_middle_dot(line: str) -> str | None:
+    """e.g. \"Price · Town, ST\" or \"· Hempstead\"."""
+    for sep in ("·", "•", "|"):
+        if sep in line:
+            parts = [p.strip() for p in line.split(sep) if p.strip()]
+            for p in reversed(parts):
+                if p.startswith("$") or _extract_price(p) is not None:
+                    continue
+                if _line_looks_like_location(p):
+                    return p
+    return None
+
+
+def _extract_listing_location_from_card_text(
+    text: str,
+    *,
+    title: str,
+    primary_search: str,
+) -> tuple[str, str | None]:
+    """
+    Returns ``(location_for_geo, parsed_display_or_none)``.
+
+    ``location_for_geo`` is always non-empty (uses primary search region as last resort).
+    ``parsed_display`` is set when we parsed a concrete line from the card (for alerts).
+    """
+    primary = (primary_search or "").strip() or "Unknown"
+    raw = (text or "").replace("\t", " ")
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        return primary, None
+
+    parsed: str | None = None
+    for ln in lines:
+        if "·" in ln or "•" in ln or "|" in ln:
+            hit = _split_location_from_middle_dot(ln)
+            if hit:
+                parsed = hit
+                break
+
+    if not parsed:
+        price_idx = None
+        for i, ln in enumerate(lines):
+            if "$" in ln and _extract_price(ln) is not None:
+                price_idx = i
+                break
+        if price_idx is not None:
+            for j in range(price_idx + 1, min(price_idx + 6, len(lines))):
+                ln = lines[j]
+                tl = (title or "").strip().lower()
+                if tl and ln.lower() == tl[: min(len(ln), len(tl))]:
+                    continue
+                if _MI_DIST_ONLY.match(ln):
+                    continue
+                if _line_looks_like_location(ln):
+                    parsed = ln
+                    break
+
+    if not parsed:
+        for ln in reversed(lines[-5:]):
+            if _line_looks_like_location(ln):
+                parsed = ln
+                break
+
+    if not parsed:
+        return primary, None
+
+    if primary and parsed.strip().lower() == primary.lower():
+        return primary, None
+
+    return parsed.strip(), parsed.strip()
+
+
 async def _parse_stub_page(
     page,
     *,
@@ -303,17 +394,23 @@ async def _harvest_visible_marketplace_cards(
         title = _title_from_card_text(text)
         if price is None or not title:
             continue
+        loc_geo, loc_parsed = _extract_listing_location_from_card_text(
+            text,
+            title=title,
+            primary_search=default_loc,
+        )
         out.append(
             RawListing(
                 title=title,
                 price=price,
-                location=default_loc,
+                location=loc_geo,
                 category_slug=cat,
                 source_link=full,
                 source="facebook_marketplace",
                 latitude=None,
                 longitude=None,
                 source_id=f"fb:{iid}",
+                listing_location_parsed=loc_parsed,
             )
         )
     if links and not out:

@@ -2,16 +2,18 @@
 Step 1 → Step 2 → Step 3 (AI scoring) → Step 4 (MongoDB + optional Telegram).
 
 Step 1: normalize + light prefilter. Step 2: strict match + Mongo dedupe.
-Step 3: Ollama scoring only for Step-2 matches. Step 4: persist first, then alert.
+Step 3: Ollama scoring for Step-2 matches (priority queue + optional cap). Step 4: persist first, then alert.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from collections import Counter
 from dataclasses import dataclass, fields
 from datetime import datetime
 
+from app.config import settings
 from app.domain import UserSettings as UserSettingsRow
 from app.models import AlertStatus
 from app.repositories.listing_repository import ListingRepository
@@ -30,6 +32,48 @@ from step2_pre_ai import pre_ai_should_score
 from mock_scraper import RawListing
 
 logger = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)).strip())
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)).strip())
+    except ValueError:
+        return default
+
+
+@dataclass
+class _AIJob:
+    """Step-2 + pre-AI approved candidate, queued for Step 3 with priority hints."""
+
+    cand: CandidateListing
+    matched_keywords: list[str]
+    pre_strength: float
+    heuristic_profit: float
+    heuristic_resale: float
+
+
+def _persisted_listing_location_text(
+    cand: CandidateListing,
+    *,
+    primary_search_location: str,
+) -> str:
+    """Prefer parsed card location; else candidate location; else search primary."""
+    meta = cand.raw_metadata or {}
+    parsed = meta.get("listing_location_parsed")
+    if isinstance(parsed, str) and parsed.strip():
+        return parsed.strip()
+    loc = (cand.location_text or "").strip()
+    if loc:
+        return loc
+    prim = (primary_search_location or "").strip()
+    return prim or "N/A"
 
 
 def _flush_pipeline(db: Database, profile: UserSettingsRow) -> None:
@@ -150,6 +194,9 @@ def process_batch(
     alerts_sent = 0
     pipeline_candidate_errors: Counter[str] = Counter()
 
+    primary_search_loc = collection_inputs.primary_search_location
+    ai_jobs: list[_AIJob] = []
+
     for cand in candidates:
         try:
             result = strict_match(cand, profile, db)
@@ -163,7 +210,7 @@ def process_batch(
             if c is None:
                 continue
 
-            pre_ok, _pre_strength, _pre_rs = pre_ai_should_score(
+            pre_ok, pre_strength, _pre_rs = pre_ai_should_score(
                 c, profile, list(result.matched_keywords)
             )
             if not pre_ok:
@@ -172,17 +219,81 @@ def process_batch(
                 continue
 
             step2_matched += 1
+            fb = estimate_profit(c.price, c.category_slug)
+            ai_jobs.append(
+                _AIJob(
+                    cand=c,
+                    matched_keywords=list(result.matched_keywords),
+                    pre_strength=pre_strength,
+                    heuristic_profit=fb.estimated_profit,
+                    heuristic_resale=fb.estimated_resale,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            err_key = f"{type(exc).__name__}:{str(exc)[:160]}"
+            pipeline_candidate_errors[err_key] += 1
+            if pipeline_candidate_errors[err_key] == 1:
+                logger.exception("Pipeline failed for one candidate: %s", exc)
+                print(
+                    f"[user={profile.user_id}] pipeline: candidate error (continuing): {exc}",
+                    flush=True,
+                )
+            else:
+                logger.debug(
+                    "Pipeline candidate error (repeat %s for same pattern): %s",
+                    pipeline_candidate_errors[err_key],
+                    exc,
+                )
+            continue
+
+    ai_jobs.sort(
+        key=lambda j: (-j.heuristic_profit, -j.pre_strength, -j.heuristic_resale),
+    )
+    ai_cap = _env_int("WORKER_STEP3_AI_CAP", 50)
+    strong_min_strength = _env_float("WORKER_OLLAMA_STRONG_MIN_STRENGTH", 0.72)
+    strong_min_hprofit = _env_float("WORKER_OLLAMA_STRONG_MIN_HEURISTIC_PROFIT", 25.0)
+    base_timeout = float(settings.ollama_timeout or 180.0)
+    strong_bonus = float(getattr(settings, "ollama_timeout_strong_bonus", 30.0))
+
+    if len(ai_jobs) > ai_cap:
+        logger.warning(
+            "Step 3: WORKER_STEP3_AI_CAP=%s — Ollama for top %s by heuristic priority; "
+            "%s lower-priority listings use heuristic-only scoring",
+            ai_cap,
+            ai_cap,
+            len(ai_jobs) - ai_cap,
+        )
+
+    profile.worker_current_step = 3
+    profile.worker_current_state = "step3_ai_scoring"
+    profile.worker_count_step2_matched = step2_matched
+    profile.worker_pipeline_message = (
+        f"Step 3: AI queue {len(ai_jobs)} (sorted by heuristic profit; cap={ai_cap})"
+    )
+    _flush_pipeline(db, profile)
+
+    for idx, job in enumerate(ai_jobs):
+        c = job.cand
+        try:
             norm = normalized_from_candidate(c)
-            profile.worker_current_step = 3
-            profile.worker_current_state = "step3_ai_scoring"
-            profile.worker_count_step2_matched = step2_matched
+            listing_loc = _persisted_listing_location_text(
+                c,
+                primary_search_location=primary_search_loc,
+            )
+            use_ollama_slot = idx < ai_cap
+            is_strong = job.pre_strength >= strong_min_strength or (
+                job.heuristic_profit >= strong_min_hprofit
+            )
+            timeout = base_timeout + (strong_bonus if is_strong else 0.0)
+
             profile.worker_pipeline_message = (
-                f"Step 3: Sending matched listings to AI ({step2_matched} matched so far; scoring {norm.title[:48]}…)"
+                f"Step 3: scoring rank {idx + 1}/{len(ai_jobs)} {norm.title[:48]}…"
             )
             _flush_pipeline(db, profile)
 
             print(
-                f"[user={profile.user_id}] step3: scoring title={norm.title[:80]!r} url={norm.source_url}",
+                f"[user={profile.user_id}] step3: rank={idx + 1}/{len(ai_jobs)} "
+                f"title={norm.title[:80]!r} url={norm.source_url}",
                 flush=True,
             )
 
@@ -192,36 +303,76 @@ def process_batch(
                 category_id=c.category_slug,
                 description=c.description or "",
                 location_text=c.location_text,
-                matched_keywords=list(result.matched_keywords),
+                matched_keywords=list(job.matched_keywords),
                 source_url=c.source_url,
                 condition_text=_condition_from_metadata(c.raw_metadata),
             )
 
-            try:
-                score = score_matched_candidate(step3_input)
-            except Exception as exc:  # noqa: BLE001
-                profile.worker_pipeline_error = f"AI scoring failed: {str(exc)[:400]}"
-                _flush_pipeline(db, profile)
-                logger.exception("Step 3 unexpected error: %s", exc)
+            if use_ollama_slot:
+                try:
+                    score = score_matched_candidate(
+                        step3_input,
+                        timeout_seconds=timeout,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    profile.worker_pipeline_error = f"AI scoring failed: {str(exc)[:400]}"
+                    _flush_pipeline(db, profile)
+                    logger.exception("Step 3 unexpected error: %s", exc)
+                    fb = estimate_profit(c.price, c.category_slug)
+                    score = Step3ScoreResult(
+                        estimated_resale=fb.estimated_resale,
+                        estimated_profit=fb.estimated_profit,
+                        confidence="low",
+                        reasoning=f"Scoring failed unexpectedly; heuristic only. ({str(exc)[:160]})",
+                        should_alert=False,
+                        used_ollama=False,
+                        ai_result={
+                            "estimated_resale": fb.estimated_resale,
+                            "estimated_profit": fb.estimated_profit,
+                            "confidence": "low",
+                            "reasoning": "worker_exception",
+                            "should_alert": False,
+                            "model": None,
+                            "scoring_error": str(exc)[:500],
+                            "used_ollama": False,
+                        },
+                    )
+            else:
                 fb = estimate_profit(c.price, c.category_slug)
                 score = Step3ScoreResult(
                     estimated_resale=fb.estimated_resale,
                     estimated_profit=fb.estimated_profit,
                     confidence="low",
-                    reasoning=f"Scoring failed unexpectedly; heuristic only. ({str(exc)[:160]})",
-                    should_alert=False,
+                    reasoning="Heuristic only: beyond WORKER_STEP3_AI_CAP priority queue.",
+                    should_alert=bool(fb.profitable),
                     used_ollama=False,
                     ai_result={
                         "estimated_resale": fb.estimated_resale,
                         "estimated_profit": fb.estimated_profit,
                         "confidence": "low",
-                        "reasoning": "worker_exception",
-                        "should_alert": False,
+                        "reasoning": "ai_cap_exceeded",
+                        "should_alert": bool(fb.profitable),
                         "model": None,
-                        "scoring_error": str(exc)[:500],
                         "used_ollama": False,
+                        "skipped_ollama_due_to_cap": True,
                     },
                 )
+
+            fallback_used = not score.used_ollama
+            logger.info(
+                "Step 3 user_id=%s rank=%s/%s priority_pre_strength=%.3f heuristic_profit=%.2f "
+                "ollama_slot=%s timeout=%.1f strong=%s used_ollama=%s fallback=%s",
+                profile.user_id,
+                idx + 1,
+                len(ai_jobs),
+                job.pre_strength,
+                job.heuristic_profit,
+                use_ollama_slot,
+                timeout if use_ollama_slot else 0.0,
+                is_strong,
+                score.used_ollama,
+                fallback_used,
+            )
 
             step3_scored += 1
             profile.worker_count_step3_scored = step3_scored
@@ -230,7 +381,8 @@ def process_batch(
             status = "ok" if score.used_ollama else "fallback"
             print(
                 f"[user={profile.user_id}] step3: {status} profit={score.estimated_profit:.2f} "
-                f"should_alert={score.should_alert} used_ollama={score.used_ollama}",
+                f"should_alert={score.should_alert} used_ollama={score.used_ollama} "
+                f"fallback={fallback_used} timeout={(timeout if use_ollama_slot else 0.0):.1f}s",
                 flush=True,
             )
 
@@ -267,7 +419,7 @@ def process_batch(
                     estimated_resale=score.estimated_resale,
                     estimated_profit=score.estimated_profit,
                     category_id=norm.category_id,
-                    location_text=norm.location_text,
+                    location_text=listing_loc,
                     source_link=norm.source_link,
                     source=norm.source,
                     profitable=profitable,
@@ -275,7 +427,7 @@ def process_batch(
                     found_at=datetime.utcnow(),
                     origin_type=origin_type,
                     description=(c.description or "").strip() or None,
-                    matched_keywords=list(result.matched_keywords),
+                    matched_keywords=list(job.matched_keywords),
                     scraped_at=c.scraped_at,
                     ai_result=step4_fields["ai_result"],
                     confidence=step4_fields["confidence"],
@@ -323,7 +475,7 @@ def process_batch(
                     price=norm.price,
                     estimated_resale=score.estimated_resale,
                     estimated_profit=score.estimated_profit,
-                    location_text=norm.location_text,
+                    location_text=listing_loc,
                     description=(c.description or "").strip() or None,
                     source_url=norm.source_url or norm.source_link,
                     confidence=conf_for_alert if conf_for_alert is not None else None,

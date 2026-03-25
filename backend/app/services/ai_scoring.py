@@ -180,13 +180,24 @@ def _failure_result(
     )
 
 
-def score_matched_candidate(inp: MatchedCandidateInput) -> Step3ScoreResult:
+def score_matched_candidate(
+    inp: MatchedCandidateInput,
+    *,
+    timeout_seconds: float | None = None,
+) -> Step3ScoreResult:
     """
     Score a single Step-2–approved candidate via Ollama. Does not raise on model/network errors.
+
+    ``timeout_seconds`` overrides the default ``OLLAMA_TIMEOUT`` for this request (e.g. stronger
+    candidates get a longer budget from the worker).
     """
     base = (settings.ollama_base_url or "").strip().rstrip("/")
     model = (settings.ollama_model or "llama3.2").strip()
-    timeout = float(settings.ollama_timeout or 180.0)
+    timeout = float(
+        timeout_seconds
+        if timeout_seconds is not None
+        else (settings.ollama_timeout or 180.0)
+    )
 
     if not base:
         fb, _ = _heuristic_fallback(inp)
@@ -273,10 +284,9 @@ def score_matched_candidate(inp: MatchedCandidateInput) -> Step3ScoreResult:
 
     try:
         er = float(parsed["estimated_resale"])
-        ep = float(parsed["estimated_profit"])
         conf = _normalize_confidence(parsed.get("confidence"))
         reason = str(parsed.get("reasoning") or "").strip() or "No reasoning provided."
-        alert = bool(parsed.get("should_alert"))
+        raw_should_alert = bool(parsed.get("should_alert"))
     except (KeyError, TypeError, ValueError) as exc:
         logger.warning("Ollama payload invalid: %s", exc)
         return _failure_result(
@@ -286,6 +296,24 @@ def score_matched_candidate(inp: MatchedCandidateInput) -> Step3ScoreResult:
             conservative_alert=False,
         )
 
+    price = float(inp.price)
+    er = round(er, 2)
+    # Ollama resale is authoritative; profit is derived so it matches UI math (resale − price).
+    ep = round(er - price, 2)
+    if "estimated_profit" in parsed:
+        try:
+            _model_ep = float(parsed["estimated_profit"])
+            logger.debug(
+                "Ollama model estimated_profit=%s ignored in favor of resale−price=%s",
+                _model_ep,
+                ep,
+            )
+        except (TypeError, ValueError):
+            pass
+
+    # Align should_alert with derived profit (resale − price).
+    alert = raw_should_alert and ep > 0.0
+
     ai_result = {
         "estimated_resale": er,
         "estimated_profit": ep,
@@ -294,10 +322,11 @@ def score_matched_candidate(inp: MatchedCandidateInput) -> Step3ScoreResult:
         "should_alert": alert,
         "model": model,
         "used_ollama": True,
+        "profit_derived_from_resale": True,
     }
     return Step3ScoreResult(
-        estimated_resale=round(er, 2),
-        estimated_profit=round(ep, 2),
+        estimated_resale=er,
+        estimated_profit=ep,
         confidence=conf,
         reasoning=reason,
         should_alert=alert,

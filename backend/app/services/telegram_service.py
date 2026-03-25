@@ -72,6 +72,17 @@ def _na_text(value: str | None, *, max_len: int = 320) -> str:
     return t[: max_len - 1].rstrip() + "…"
 
 
+def _first_n_words(text: str | None, *, max_words: int = 30) -> str:
+    """First ~N words of listing body; safe on empty / odd whitespace."""
+    raw = (text or "").strip()
+    if not raw:
+        return "N/A"
+    words = raw.split()
+    if len(words) <= max_words:
+        return " ".join(words)
+    return " ".join(words[:max_words]) + "…"
+
+
 def _fmt_confidence(raw: str | float | int | None) -> str:
     if raw is None:
         return "N/A"
@@ -100,11 +111,11 @@ def build_listing_alert_text(
         "Listing alert",
         f"Title: {_na_text(title, max_len=500)}",
         f"Price: {_na_money(price)}",
-        f"Est. retail: {_na_money(estimated_resale)}",
-        f"Est. profit: {_na_money(estimated_profit)}",
-        f"Location: {_na_text(location_text, max_len=240)}",
+        f"Est. retail / resale: {_na_money(estimated_resale)}",
+        f"Est. profit (retail − price): {_na_money(estimated_profit)}",
+        f"Listing location: {_na_text(location_text, max_len=240)}",
         f"Confidence: {_fmt_confidence(confidence)}",
-        f"Description: {_na_text(description, max_len=280)}",
+        f"Description (snippet): {_first_n_words(description, max_words=30)}",
         f"URL: {(source_url or '').strip() or 'N/A'}",
     ]
     text = "\n".join(lines)

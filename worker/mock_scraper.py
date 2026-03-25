@@ -20,6 +20,8 @@ class RawListing:
     description: str = ""
     image_url: str | None = None
     source_id: str | None = None
+    # When harvest parses a city/line from the card (distinct from search region when possible).
+    listing_location_parsed: str | None = None
 
 
 def _pick_location(primary: str, areas: list[str]) -> str:
