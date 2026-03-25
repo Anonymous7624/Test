@@ -1,9 +1,12 @@
 """
-Normalize → dedupe → Ollama scoring → MongoDB → optional Telegram (unchanged contract).
+Step 1 → Step 2 → Step 3 (Ollama) → MongoDB → optional Telegram.
+
+Step 1: normalize + light prefilter. Step 2: strict match + Mongo dedupe. Step 3+: scoring (unchanged).
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -14,7 +17,10 @@ from app.services.ollama_scoring import score_listing_with_ollama
 from app.services.telegram_service import send_profit_alert
 from pymongo.database import Database
 
-from matching import raw_matches_profile
+from candidate_models import CandidateListing
+from search_context import build_collection_inputs
+from step1_normalize import normalize_raw_to_candidate, prefilter_candidate
+from step2_matcher import strict_match
 from mock_scraper import RawListing
 
 
@@ -30,18 +36,16 @@ class NormalizedListing:
     source: str
 
 
-def normalize(raw: RawListing, owner_user_id: int) -> NormalizedListing:
-    ext = raw.source_link.rsplit("/", maxsplit=1)[-1]
-    source_url = raw.source_link.strip()
+def normalized_from_candidate(c: CandidateListing) -> NormalizedListing:
     return NormalizedListing(
-        source_url=source_url,
-        source_id=f"{raw.source}:{ext}",
-        title=raw.title.strip(),
-        price=float(raw.price),
-        location_text=raw.location.strip(),
-        category_id=raw.category_slug.strip(),
-        source_link=raw.source_link,
-        source=raw.source,
+        source_url=c.source_url,
+        source_id=c.source_id,
+        title=c.title,
+        price=c.price,
+        location_text=c.location_text,
+        category_id=c.category_slug,
+        source_link=c.source_link,
+        source=c.source,
     )
 
 
@@ -52,14 +56,52 @@ def process_batch(
     profile: UserSettingsRow,
     origin_type: str = "live",
 ) -> int:
-    """Insert new listings for this user; returns count inserted."""
-    matched = [r for r in raws if raw_matches_profile(r, profile)]
+    """
+    Run Step 1 (normalize + prefilter), Step 2 (strict match + dedupe), then AI + persistence.
+    Returns count inserted into MongoDB.
+    """
+    collection_inputs = build_collection_inputs(profile)
+
+    step1_raw = len(raws)
+    candidates: list[CandidateListing] = []
+    step1_prefilter_drop = 0
+    prefilter_reasons: Counter[str] = Counter()
+
+    for raw in raws:
+        cand = normalize_raw_to_candidate(
+            raw,
+            profile,
+            collection_inputs,
+            origin_type=origin_type,
+        )
+        ok, reason = prefilter_candidate(cand, max_price=collection_inputs.max_price)
+        if not ok:
+            step1_prefilter_drop += 1
+            if reason:
+                prefilter_reasons[reason] += 1
+            continue
+        candidates.append(cand)
+
+    step1_kept = len(candidates)
     repo = ListingRepository(db)
     inserted = 0
-    for raw in matched:
-        norm = normalize(raw, profile.user_id)
-        if repo.find_by_user_source_url(profile.user_id, norm.source_url):
+    step2_pass = 0
+    step2_reject = 0
+    step2_reason_counter: Counter[str] = Counter()
+
+    for cand in candidates:
+        result = strict_match(cand, profile, db)
+        if not result.matched:
+            step2_reject += 1
+            for r in result.rejection_reasons:
+                step2_reason_counter[r] += 1
             continue
+
+        step2_pass += 1
+        c = result.candidate_for_ai
+        if c is None:
+            continue
+        norm = normalized_from_candidate(c)
         score = score_listing_with_ollama(
             title=norm.title,
             price=norm.price,
@@ -102,4 +144,13 @@ def process_batch(
         )
         if created is not None:
             inserted += 1
+
+    print(
+        f"[user={profile.user_id}] listing pipeline: "
+        f"step1_raw={step1_raw} step1_kept={step1_kept} step1_prefilter_drop={step1_prefilter_drop} "
+        f"prefilter={dict(prefilter_reasons)} | "
+        f"step2_pass={step2_pass} step2_reject={step2_reject} step2_reasons={dict(step2_reason_counter)} | "
+        f"inserted={inserted}",
+        flush=True,
+    )
     return inserted

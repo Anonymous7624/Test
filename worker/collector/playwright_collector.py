@@ -14,6 +14,8 @@ from pathlib import Path
 
 from mock_scraper import RawListing
 
+from search_context import CollectionInputs
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _FACEBOOK_AUTH_STATE = (
     _REPO_ROOT / "backend" / "playwright" / ".auth" / "facebook.json"
@@ -49,8 +51,15 @@ def _parse_float(val: str | None) -> float | None:
         return None
 
 
-def fetch_listings_playwright(*, backfill: bool) -> list[RawListing]:
-    """Parse stub HTML via Playwright. `backfill` selects batch size hint (stub returns all)."""
+def fetch_listings_playwright(
+    *,
+    collection_inputs: CollectionInputs,
+    backfill: bool,
+) -> list[RawListing]:
+    """
+    Targeted collection: parse stub HTML via Playwright, keep only listings for this profile's category.
+    `backfill` selects batch size hint (stub returns all, then duplicates for archive rows).
+    """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:  # pragma: no cover
@@ -66,6 +75,7 @@ def fetch_listings_playwright(*, backfill: bool) -> list[RawListing]:
 
     uri = stub_path.as_uri()
     out: list[RawListing] = []
+    target_cat = (collection_inputs.category_id or "general").strip()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -81,12 +91,15 @@ def fetch_listings_playwright(*, backfill: bool) -> list[RawListing]:
                     lat = _parse_float(el.get_attribute("data-lat"))
                     lon = _parse_float(el.get_attribute("data-lon"))
                     cat = (el.get_attribute("data-category") or "general").strip()
+                    if cat != target_cat:
+                        continue
                     h2 = el.query_selector("h2")
                     loc_el = el.query_selector(".loc")
                     title = (h2.inner_text() if h2 else "").strip()
                     loc = (loc_el.inner_text() if loc_el else "").strip()
                     if not url or title == "" or price_a is None:
                         continue
+                    ext = url.rsplit("/", maxsplit=1)[-1]
                     out.append(
                         RawListing(
                             title=title,
@@ -97,6 +110,7 @@ def fetch_listings_playwright(*, backfill: bool) -> list[RawListing]:
                             source="playwright_stub",
                             latitude=lat,
                             longitude=lon,
+                            source_id=f"playwright_stub:{ext}",
                         )
                     )
                 if not backfill:

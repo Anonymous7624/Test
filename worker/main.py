@@ -34,27 +34,31 @@ from collector.playwright_collector import (  # noqa: E402
 )
 from mock_scraper import RawListing, mock_fetch_backfill, mock_fetch_batch  # noqa: E402
 from pipeline import process_batch  # noqa: E402
-from search_context import build_search_location_hint  # noqa: E402
+from search_context import build_collection_inputs  # noqa: E402
 
 
 def _collect_raws(profile: UserSettingsRow, *, backfill: bool) -> list[RawListing]:
-    hint = build_search_location_hint(profile)
+    inputs = build_collection_inputs(profile)
     try:
-        return fetch_listings_playwright(backfill=backfill)
+        return fetch_listings_playwright(collection_inputs=inputs, backfill=backfill)
     except FacebookAuthStateMissingError:
         raise
     except Exception as exc:  # noqa: BLE001
         print(f"Playwright collector failed, using mock data: {exc}", flush=True)
         if backfill:
             return mock_fetch_backfill(
-                category_slug=profile.category_id,
-                location=hint,
-                max_price=float(profile.max_price),
+                category_slug=inputs.category_id,
+                location=inputs.primary_search_location,
+                max_price=inputs.max_price,
+                keywords=inputs.keywords,
+                search_area_labels=inputs.search_area_labels,
             )
         return mock_fetch_batch(
-            category_slug=profile.category_id,
-            location=hint,
-            max_price=float(profile.max_price),
+            category_slug=inputs.category_id,
+            location=inputs.primary_search_location,
+            max_price=inputs.max_price,
+            keywords=inputs.keywords,
+            search_area_labels=inputs.search_area_labels,
         )
 
 
