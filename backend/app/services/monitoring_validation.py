@@ -6,6 +6,7 @@ from typing import TypedDict
 
 from app.domain import UserSettings as UserSettingsRow
 from app.services.marketplace_categories_service import validate_marketplace_slug
+from app.services.marketplace_step1_queries import custom_keyword_mode_search_ready
 from app.services.search_settings import normalize_custom_keywords
 from app.services.units import km_to_miles, miles_to_km
 
@@ -41,7 +42,9 @@ def _search_config_ok(s: UserSettingsRow) -> bool:
     if sm == "marketplace_category":
         return bool(validate_marketplace_slug(str(s.marketplace_category_slug or "")))
     if sm == "custom_keywords":
-        return len(normalize_custom_keywords(s.custom_keywords)) >= 1
+        if len(normalize_custom_keywords(s.custom_keywords)) < 1:
+            return False
+        return custom_keyword_mode_search_ready(s.custom_keywords)
     return False
 
 
@@ -59,7 +62,7 @@ def readiness_checks(s: UserSettingsRow) -> list[ReadinessCheck]:
         },
         {
             "id": "search",
-            "label": "Search mode configured (category or keywords)",
+            "label": "Search mode configured (Marketplace category or custom keywords)",
             "ok": search_ok,
         },
         {
@@ -88,7 +91,11 @@ def readiness_errors(s: UserSettingsRow) -> list[str]:
             errors.append("Select a Marketplace category.")
     elif sm == "custom_keywords":
         if len(normalize_custom_keywords(s.custom_keywords)) < 1:
-            errors.append("Add at least one custom keyword (up to 15).")
+            errors.append("Add at least one keyword to use custom keyword mode.")
+        elif not custom_keyword_mode_search_ready(s.custom_keywords):
+            errors.append(
+                "Add at least one specific keyword (generic words like “free” or “sale” alone are not enough)."
+            )
     else:
         errors.append("Invalid search mode.")
     if _radius_miles(s) < MIN_RADIUS_MILES:

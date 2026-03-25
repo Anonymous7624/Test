@@ -101,6 +101,7 @@ def process_batch(
     profile.worker_current_state = "step1_normalize"
     profile.worker_pipeline_message = "Step 1: Normalizing and prefiltering listings"
     profile.worker_pipeline_error = None
+    profile.worker_configuration_error = None
     _flush_pipeline(db, profile)
 
     raw_collected = len(raws)
@@ -365,6 +366,7 @@ def process_batch(
         f"Batch complete: collected={stats.raw_collected} matched={stats.step2_matched} "
         f"scored={stats.step3_scored} saved={stats.step4_saved} alerts={stats.alerts_sent}"
     )
+    profile.worker_configuration_error = None
     _flush_pipeline(db, profile)
 
     print(

@@ -6,6 +6,7 @@ import re
 from typing import Any, Literal
 
 from app.services.marketplace_categories_service import label_for_slug, validate_marketplace_slug
+from app.services.marketplace_step1_queries import custom_keyword_mode_search_ready
 
 MAX_CUSTOM_KEYWORDS = 15
 
@@ -51,10 +52,12 @@ def migrate_settings_doc(doc: dict[str, Any]) -> dict[str, Any]:
     Safe to call on every read — idempotent for already-migrated docs.
     """
     d = dict(doc)
+    legacy_category_id = d.pop("category_id", None)
+    d.pop("max_price", None)
 
     # search_mode
     if "search_mode" not in d or not str(d.get("search_mode") or "").strip():
-        legacy_cat = str(d.get("category_id") or "general").strip()
+        legacy_cat = str(legacy_category_id or "general").strip()
         if legacy_cat == "general":
             d["search_mode"] = "custom_keywords"
             if "custom_keywords" not in d or d.get("custom_keywords") is None:
@@ -86,7 +89,6 @@ def migrate_settings_doc(doc: dict[str, Any]) -> dict[str, Any]:
     # custom keywords
     d["custom_keywords"] = normalize_custom_keywords(d.get("custom_keywords"))
 
-    # drop legacy max_price from persisted state on next save (optional)
     return d
 
 
@@ -105,6 +107,11 @@ def validate_settings_for_save(
         return
     kws = normalize_custom_keywords(custom_keywords)
     if not kws:
-        raise ValueError("Add at least one keyword (up to 15).")
+        raise ValueError("Add at least one keyword to use custom keyword mode.")
+    if not custom_keyword_mode_search_ready(custom_keywords):
+        raise ValueError(
+            "Custom keyword phrases must include at least one specific product term "
+            "(generic words like “free” or “sale” alone are removed)."
+        )
     if len(kws) > MAX_CUSTOM_KEYWORDS:
         raise ValueError(f"At most {MAX_CUSTOM_KEYWORDS} keywords.")

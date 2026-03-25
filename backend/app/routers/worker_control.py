@@ -93,6 +93,7 @@ def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
             "worker_last_collector_failure_message": getattr(
                 s, "worker_last_collector_failure_message", None
             ),
+            "worker_configuration_error": getattr(s, "worker_configuration_error", None),
             "backfill_complete": bool(getattr(s, "backfill_complete", True)),
             "counts": counts.model_dump(),
             "counts_scope": "last_completed_batch_steps_1_to_4",
@@ -118,6 +119,7 @@ def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
         pipeline_counts_scope="last_batch",
         admin_pipeline_snapshot=admin_snap,
         collector_warning=getattr(s, "worker_collector_warning", None),
+        configuration_error=getattr(s, "worker_configuration_error", None),
     )
 
 
@@ -128,6 +130,7 @@ def _soft_idle_on_stop(s: UserSettingsRow) -> None:
     s.worker_pipeline_message = ""
     s.worker_collector_warning = None
     s.worker_pipeline_error = None
+    s.worker_configuration_error = None
 
 
 @router.post("/run", response_model=WorkerStatus)
@@ -151,6 +154,7 @@ def run_monitoring(
     s.worker_collector_warning = None
     s.worker_last_collector_failure_at = None
     s.worker_last_collector_failure_message = None
+    s.worker_configuration_error = None
     s.worker_current_step = 0
     s.worker_current_state = "starting"
     s.worker_pipeline_message = "Monitoring requested — waiting for worker to pick up."

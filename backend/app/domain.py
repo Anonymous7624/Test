@@ -53,6 +53,8 @@ class UserSettings:
     # Last collector failure (historical / debug); cleared when a later collection succeeds.
     worker_last_collector_failure_at: datetime | None = None
     worker_last_collector_failure_message: str | None = None
+    # Invalid search settings (not Playwright) — cleared when a batch starts or completes successfully.
+    worker_configuration_error: str | None = None
 
 
 @dataclass

@@ -46,6 +46,7 @@ def _default_settings_doc(user_id: int) -> dict:
         "worker_collector_warning": None,
         "worker_last_collector_failure_at": None,
         "worker_last_collector_failure_message": None,
+        "worker_configuration_error": None,
     }
 
 
@@ -97,6 +98,7 @@ def settings_from_doc(doc: dict) -> UserSettingsState:
         worker_collector_warning=d.get("worker_collector_warning"),
         worker_last_collector_failure_at=d.get("worker_last_collector_failure_at"),
         worker_last_collector_failure_message=d.get("worker_last_collector_failure_message"),
+        worker_configuration_error=d.get("worker_configuration_error"),
     )
 
 

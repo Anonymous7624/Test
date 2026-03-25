@@ -293,7 +293,7 @@ export default function SettingsPage() {
               Cannot fetch worker status: {worker.status_fetch_error}
             </p>
           ) : null}
-          {worker?.pipeline_message ? (
+          {worker?.pipeline_message && !worker?.configuration_error ? (
             <p className="mt-2 text-xs text-zinc-400">
               <span className="text-zinc-500">Pipeline: </span>
               {worker.pipeline_message}
@@ -330,9 +330,15 @@ export default function SettingsPage() {
               </dl>
             </div>
           ) : null}
+          {worker?.configuration_error ? (
+            <p className="mt-3 rounded-lg border border-amber-900/50 bg-amber-950/25 px-3 py-2 text-xs text-amber-100/95">
+              <span className="font-medium text-amber-200/95">Search settings — </span>
+              {worker.configuration_error}
+            </p>
+          ) : null}
           {worker?.last_error ? (
             <p className="mt-3 rounded-lg border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-200">
-              <span className="font-medium text-red-300/95">Active worker fatal error — </span>
+              <span className="font-medium text-red-300/95">Collector / pipeline error — </span>
               {worker.last_error}
             </p>
           ) : null}

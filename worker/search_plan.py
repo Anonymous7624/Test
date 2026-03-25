@@ -9,48 +9,13 @@ via the Marketplace search box (never global Facebook search).
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Literal
 
 from app.domain import UserSettings as UserSettingsRow
-from app.services.search_settings import normalize_custom_keywords
+from app.services.marketplace_step1_queries import focused_queries_from_custom_keywords
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_EXCLUDED_QUERY_TOKENS: frozenset[str] = frozenset(
-    {
-        "deal",
-        "deals",
-        "sale",
-        "sales",
-        "local",
-        "bundle",
-        "bundles",
-        "clearance",
-        "cheap",
-        "cheapest",
-        "discount",
-        "discounted",
-        "near",
-        "me",
-        "nearby",
-        "lot",
-        "lots",
-        "assorted",
-        "misc",
-        "various",
-        "free",
-        "obo",
-        "firm",
-        "must",
-        "go",
-        "quick",
-        "asap",
-        "today",
-        "urgent",
-    }
-)
 
 DEFAULT_MARKETPLACE_SORT = "creation_time_descend"
 
@@ -58,50 +23,9 @@ MARKETPLACE_SORT_UI_LABEL: dict[str, str] = {
     "creation_time_descend": "Newest first",
 }
 
-_MAX_FOCUS_QUERIES = 15
-_TOKEN_SPLIT_RE = re.compile(r"[\s,/]+")
-
 
 def _radius_km_to_miles(r_km: float) -> float:
     return float(r_km) * 0.621371192237334
-
-
-def _sanitize_token(t: str) -> str | None:
-    s = t.strip().lower()
-    if len(s) < 2:
-        return None
-    if s in DEFAULT_EXCLUDED_QUERY_TOKENS:
-        return None
-    s = s.strip("'\"")
-    if len(s) < 2 or s in DEFAULT_EXCLUDED_QUERY_TOKENS:
-        return None
-    return s
-
-
-def focused_queries_from_custom_keywords(raw_keywords: list[str], *, max_queries: int = _MAX_FOCUS_QUERIES) -> list[str]:
-    """Deduped keyword phrases for Marketplace search (custom_keywords mode)."""
-    seen_lower: set[str] = set()
-    out: list[str] = []
-    for phrase in normalize_custom_keywords(raw_keywords):
-        if not phrase or not str(phrase).strip():
-            continue
-        parts = [p for p in _TOKEN_SPLIT_RE.split(str(phrase).strip()) if p]
-        kept_tokens: list[str] = []
-        for p in parts:
-            tok = _sanitize_token(p)
-            if tok:
-                kept_tokens.append(tok)
-        if not kept_tokens:
-            continue
-        q = " ".join(kept_tokens)
-        low = q.lower()
-        if low in seen_lower:
-            continue
-        seen_lower.add(low)
-        out.append(q)
-        if len(out) >= max_queries:
-            break
-    return out
 
 
 class SearchPlanInvalidError(RuntimeError):
@@ -119,17 +43,17 @@ def build_marketplace_entry_url(plan: SearchPlan) -> str:
 def validate_search_plan_for_step1(plan: SearchPlan) -> None:
     if not (plan.location_text or "").strip():
         raise SearchPlanInvalidError(
-            "Step 1 requires location_text to set Marketplace location/radius in the UI."
+            "Location is required to set Marketplace location and radius in the browser."
         )
     if plan.search_mode == "custom_keywords":
         qs = [q.strip() for q in plan.focused_queries if q and str(q).strip()]
         if not qs:
             raise SearchPlanInvalidError(
-                "Step 1 custom keyword mode requires at least one keyword phrase after normalization."
+                "Custom keyword mode requires at least one keyword."
             )
     elif plan.search_mode == "marketplace_category":
         if not (plan.marketplace_category_slug or "").strip():
-            raise SearchPlanInvalidError("Step 1 marketplace category mode requires a category slug.")
+            raise SearchPlanInvalidError("Select a Marketplace category.")
     else:
         raise SearchPlanInvalidError(f"Unknown search_mode={plan.search_mode!r}.")
 

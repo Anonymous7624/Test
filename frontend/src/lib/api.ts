@@ -239,6 +239,8 @@ export type WorkerStatusPayload = {
   admin_pipeline_snapshot?: Record<string, unknown> | null;
   /** Marketplace UI advanced filters skipped or partial; search may be broader than settings. */
   collector_warning?: string | null;
+  /** Invalid search settings (not a Playwright failure). */
+  configuration_error?: string | null;
   /** Set by client when status could not be loaded (never thrown). */
   status_fetch_error?: string;
   /** worker_count_* numbers are from the last completed batch, not lifetime totals. */

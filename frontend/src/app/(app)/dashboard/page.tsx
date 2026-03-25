@@ -82,7 +82,7 @@ export default function DashboardPage() {
             Last checked:{" "}
             {worker?.last_checked_at ? new Date(worker.last_checked_at).toLocaleString() : "—"}
           </p>
-          {worker?.pipeline_message ? (
+          {worker?.pipeline_message && !worker?.configuration_error ? (
             <p className="mt-2 text-xs leading-snug text-zinc-400">
               <span className="text-zinc-600">Live: </span>
               {worker.pipeline_message}
@@ -104,9 +104,15 @@ export default function DashboardPage() {
               Last successful batch: {new Date(worker.last_successful_run_at).toLocaleString()}
             </p>
           ) : null}
+          {worker?.configuration_error ? (
+            <p className="mt-2 text-xs text-amber-100/95">
+              <span className="font-medium text-amber-200/95">Search settings — </span>
+              {worker.configuration_error}
+            </p>
+          ) : null}
           {worker?.last_error ? (
             <p className="mt-2 text-xs text-red-300">
-              <span className="font-medium text-red-200/95">Last fatal error — </span>
+              <span className="font-medium text-red-200/95">Last collector error — </span>
               {worker.last_error}
             </p>
           ) : null}

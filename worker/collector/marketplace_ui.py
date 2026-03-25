@@ -2,9 +2,9 @@
 Facebook Marketplace: apply built-in filters via the logged-in web UI (Playwright async).
 
 Facebook changes markup frequently; selectors use roles/labels with fallbacks. Location and radius
-are required for a meaningful search. The Filters drawer (sort only; max price is Step 2) is
-best-effort: if it cannot be opened or controls fail, the collector continues with focused queries
-using location/radius and category path. Max price is never applied in Marketplace UI.
+are required for a meaningful search. The Filters drawer (sort only) is best-effort: if it cannot be
+opened or controls fail, the collector continues with the category feed or keyword queries using
+location/radius and category path. No user-configurable price cap is applied in Marketplace UI.
 """
 
 from __future__ import annotations
@@ -617,7 +617,7 @@ async def apply_marketplace_filters_ui(
             applied["worker_collector_warning"][:500],
         )
     else:
-        # Sort only (max price is Step 2)
+        # Sort only (no price filter in UI)
         try:
             await _set_sort_in_filters(page, plan)
             applied["sort_ui"] = "applied"

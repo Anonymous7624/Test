@@ -237,6 +237,10 @@ class WorkerStatus(BaseModel):
     )
     admin_pipeline_snapshot: dict | None = None
     collector_warning: str | None = None
+    configuration_error: str | None = Field(
+        default=None,
+        description="Invalid search settings (not a collector/browser failure); clear when settings are fixed and a batch succeeds.",
+    )
 
 
 class TelegramVerificationStart(BaseModel):

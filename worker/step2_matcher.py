@@ -1,4 +1,4 @@
-"""Step 2: strict matching, dedupe against MongoDB, geo + search-mode relevance (no max price)."""
+"""Step 2: strict matching, dedupe against MongoDB, geo + search-mode relevance."""
 
 from __future__ import annotations
 

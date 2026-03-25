@@ -5,8 +5,8 @@ Uses ``storage_state`` from ``backend/playwright/.auth/facebook.json`` (see
 ``facebook_login_bootstrap.py`` at repo root).
 
 Modes:
-- Default: navigate to Marketplace (path-only entry URL), apply filters in the UI, then run
-  focused product queries in the search box (no weak ``?maxPrice=...``-only URLs).
+- Default: navigate to Marketplace (path-only entry URL), apply filters in the UI, then browse
+  the category feed or run Marketplace keyword searches (no price filter params in the URL).
 - ``COLLECTOR_USE_LOCAL_STUB=1``: load local HTML (``COLLECTOR_STUB_HTML`` or bundled stub)
   for offline/CI — same DOM as before.
 """
@@ -22,7 +22,6 @@ from pathlib import Path
 from mock_scraper import RawListing
 
 from search_context import CollectionInputs
-from search_plan import SearchPlanInvalidError, validate_search_plan_for_step1
 
 from .errors import CollectorInterruptedError
 from .marketplace_dom import (
@@ -500,14 +499,9 @@ async def fetch_listings_playwright(
     )
 
     if not use_stub:
-        try:
-            validate_search_plan_for_step1(plan)
-        except SearchPlanInvalidError:
-            logger.exception("Invalid search plan for Step 1 (user_id=%s)", plan.user_id)
-            raise
         logger.info(
             "Step 1 strategy user_id=%s: path-only Marketplace entry + UI filters (location, radius, "
-            "sort); category feed browse and/or keyword queries — no ?maxPrice= URL params.",
+            "sort); category feed browse and/or keyword queries (search plan validated before Playwright).",
             plan.user_id,
         )
 

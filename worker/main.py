@@ -37,6 +37,7 @@ from collector.playwright_collector import (  # noqa: E402
 from mock_scraper import RawListing, mock_fetch_backfill, mock_fetch_batch  # noqa: E402
 from pipeline import process_batch  # noqa: E402
 from search_context import build_collection_inputs  # noqa: E402
+from search_plan import SearchPlanInvalidError, validate_search_plan_for_step1  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ async def _collect_raws(
 ) -> tuple[list[RawListing], dict]:
     """Returns (raw listings, collector metadata e.g. degraded UI mode)."""
     inputs = build_collection_inputs(profile)
+    validate_search_plan_for_step1(inputs.search_plan)
     if _mock_collector_enabled():
         logger.warning(
             "Using MOCK collector (WORKER_MOCK_COLLECTOR is set); no Playwright / Facebook."
@@ -113,6 +115,7 @@ def _begin_listing_collection(
     # New batch — drop prior collector failure snapshot so the UI is not stuck on an old run.
     s.worker_last_collector_failure_at = None
     s.worker_last_collector_failure_message = None
+    s.worker_configuration_error = None
     # New attempt — do not show the previous tick's fatal error while this cycle runs.
     s.last_error = None
     repo.replace_settings(s)
@@ -136,6 +139,7 @@ def _persist_batch_interrupted(
     s.worker_pipeline_error = None
     s.worker_last_collector_failure_at = None
     s.worker_last_collector_failure_message = None
+    s.worker_configuration_error = None
     s.last_error = None
     s.last_checked_at = now
     repo.replace_settings(s)
@@ -143,6 +147,33 @@ def _persist_batch_interrupted(
         "Batch interrupted: user_id=%s backfill=%s (no collector_error recorded)",
         s.user_id,
         backfill,
+    )
+
+
+def _persist_configuration_error(
+    repo: UserRepository,
+    s: UserSettingsRow,
+    now: datetime,
+    *,
+    backfill: bool,
+    message: str,
+) -> None:
+    """Invalid search settings — not a Playwright/collector failure."""
+    msg = (message or "").strip() or "Search settings are incomplete or invalid."
+    s.worker_current_state = "configuration_error"
+    s.worker_pipeline_message = msg
+    s.worker_configuration_error = msg[:500]
+    s.worker_pipeline_error = None
+    s.worker_collector_warning = None
+    s.last_error = None
+    s.monitoring_state = "error"
+    s.last_checked_at = now
+    repo.replace_settings(s)
+    logger.warning(
+        "Search configuration invalid user_id=%s backfill=%s: %s",
+        s.user_id,
+        backfill,
+        msg[:200],
     )
 
 
@@ -171,6 +202,7 @@ def _after_listing_collection(
     s.worker_collector_warning = (str(warn)[:500] if warn else None)
     # Collector succeeded — a prior tick may still have left last_error in DB until we clear it here.
     s.last_error = None
+    s.worker_configuration_error = None
     repo.replace_settings(s)
     logger.info(
         "Collector success (worker): user_id=%s raw_count=%s",
@@ -194,6 +226,11 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
         _begin_listing_collection(repo, s, now, backfill=True)
         try:
             raws, collector_meta = await _collect_raws(s, backfill=True)
+        except SearchPlanInvalidError as exc:
+            _persist_configuration_error(
+                repo, s, now, backfill=True, message=str(exc)
+            )
+            return
         except CollectorInterruptedError:
             _persist_batch_interrupted(repo, s, now, backfill=True)
             return
@@ -251,6 +288,11 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
     _begin_listing_collection(repo, s, now, backfill=False)
     try:
         raws, collector_meta = await _collect_raws(s, backfill=False)
+    except SearchPlanInvalidError as exc:
+        _persist_configuration_error(
+            repo, s, now, backfill=False, message=str(exc)
+        )
+        return
     except CollectorInterruptedError:
         _persist_batch_interrupted(repo, s, now, backfill=False)
         return
