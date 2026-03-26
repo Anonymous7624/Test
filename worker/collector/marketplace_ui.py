@@ -373,6 +373,7 @@ async def _date_listed_text_locator_in_scope(scope):
         re.compile(r"date\s*listed", re.I),
         re.compile(r"listed\s*date", re.I),
         re.compile(r"date\s+posted", re.I),
+        re.compile(r"listed\s+on", re.I),
     )
     for pat in patterns:
         loc = scope.get_by_text(pat)
@@ -384,10 +385,31 @@ async def _date_listed_text_locator_in_scope(scope):
     return None, "no_date_listed_text_match"
 
 
+async def _filters_heading_visible_in_main(main) -> bool:
+    """True if a Filters heading/label is visible in the category left rail (loose match)."""
+    for loc in (
+        main.get_by_role("heading", name=re.compile(r"filters", re.I)),
+        main.get_by_text(re.compile(r"^\s*filters\s*$", re.I)),
+        main.get_by_text(re.compile(r"\bfilters\b", re.I)),
+    ):
+        try:
+            if await loc.count() < 1:
+                continue
+            el = loc.first
+            if await el.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 async def _left_sidebar_category_filter_rail_visible(page) -> tuple[bool, str]:
     """
     Category browse pages: left column often has a visible ``Filters`` heading and ``Date listed``
     in the same main landmark. Prefer this before drawer-style detection.
+
+    A visible Filters heading alone counts as inline evidence (Date listed may be below the fold or
+    not yet matched by strict visibility checks).
     """
     main = page.locator('[role="main"]')
     if await main.count() < 1:
@@ -395,28 +417,19 @@ async def _left_sidebar_category_filter_rail_visible(page) -> tuple[bool, str]:
 
     await _scroll_main_for_filters(page)
 
-    has_filters_heading = False
-    for loc in (
-        main.get_by_role("heading", name=re.compile(r"^filters$", re.I)),
-        main.get_by_text(re.compile(r"^filters$", re.I)),
-    ):
-        try:
-            if await loc.count() < 1:
-                continue
-            el = loc.first
-            if await el.is_visible():
-                has_filters_heading = True
-                break
-        except Exception:
-            continue
+    has_filters_heading = await _filters_heading_visible_in_main(main)
 
     if has_filters_heading:
         try:
             dl, pat = await _date_listed_text_locator_in_scope(main)
             if dl is not None and await _locator_visible_and_enabled(dl):
                 return True, f"category_left_rail:filters_heading+date_listed:{pat}"
+            mtxt = (await main.first.inner_text())[:12000]
+            if re.search(r"date\s*listed|listed\s*date", mtxt, re.I):
+                return True, "category_left_rail:filters_heading+date_listed_text_in_main_dom"
+            return True, "category_left_rail:filters_heading_inline_evidence"
         except Exception:
-            pass
+            return True, "category_left_rail:filters_heading_inline_evidence"
 
     return False, "category_left_rail_not_matched"
 
@@ -529,6 +542,15 @@ async def _find_left_filters_container_scope(page) -> tuple[Any | None, str]:
         return None, "no_main_landmark"
 
     await _scroll_main_for_filters(page)
+
+    # Category pages: visible Filters heading + "Date listed" in main text → search within main.
+    try:
+        if await _filters_heading_visible_in_main(main):
+            mtxt = (await main.first.inner_text())[:12000]
+            if re.search(r"date\s*listed|listed\s*date", mtxt, re.I):
+                return main.first, "left_rail:main_filters_heading_and_date_listed_in_dom"
+    except Exception:
+        pass
 
     # Aside / complementary regions often hold the left filter column.
     for name, loc in (
@@ -649,10 +671,23 @@ async def _probe_date_listed_root(page) -> tuple[Any, str, str]:
     return None, "none", "date_listed_not_found_anywhere"
 
 
+def _surface_from_probe_labels(
+    probe_label: str,
+) -> tuple[str, bool, bool]:
+    """Map probe label to (surface, inline_filters_found, drawer_mode)."""
+    if probe_label == "inline_main":
+        return "left_sidebar", True, False
+    if probe_label == "dialog":
+        return "filters_dialog", False, True
+    return "page_fallback", False, False
+
+
 async def _discover_filters_surface(page) -> dict[str, Any]:
     """
     Resolve where filters live: inline left column, Filters dialog, or probed Date listed region.
-    Unlike drawer-only flow, does not give up if the drawer click does not match heuristics.
+
+    Inline left rail and page/main Date listed probes run before any Filters drawer click so we do
+    not mistake the category page heading for a drawer opener.
     """
     discovery_log: list[str] = []
 
@@ -671,6 +706,26 @@ async def _discover_filters_surface(page) -> dict[str, Any]:
                 "selector_used": left_reason,
                 "attempt_log": [f"inline_filters: {left_reason}"],
                 "surface": "left_sidebar",
+            },
+            "discovery_log": discovery_log,
+        }
+
+    probe_root, probe_label, probe_detail = await _probe_date_listed_root(page)
+    discovery_log.append(f"probe_before_drawer:{probe_label}:{probe_detail}")
+
+    if probe_root is not None:
+        surf, inline_ok, drawer_mode = _surface_from_probe_labels(probe_label)
+        return {
+            "surface_ready": True,
+            "inline_filters_found": inline_ok,
+            "drawer_mode": drawer_mode,
+            "drawer_info": {
+                "opened": False,
+                "already_visible": True,
+                "selector_used": probe_detail,
+                "attempt_log": [f"probe_before_drawer:{probe_detail}"],
+                "surface": surf,
+                "probe_root_hint": probe_label,
             },
             "discovery_log": discovery_log,
         }
@@ -711,24 +766,22 @@ async def _discover_filters_surface(page) -> dict[str, Any]:
             "discovery_log": discovery_log,
         }
 
-    probe_root, probe_label, probe_detail = await _probe_date_listed_root(page)
-    discovery_log.append(f"probe:{probe_label}:{probe_detail}")
+    probe_root2, probe_label2, probe_detail2 = await _probe_date_listed_root(page)
+    discovery_log.append(f"probe_after_drawer:{probe_label2}:{probe_detail2}")
 
-    if probe_root is not None:
-        surf = "left_sidebar" if probe_label == "inline_main" else (
-            "filters_dialog" if probe_label == "dialog" else "page_fallback"
-        )
+    if probe_root2 is not None:
+        surf, inline_ok, drawer_mode = _surface_from_probe_labels(probe_label2)
         return {
             "surface_ready": True,
-            "inline_filters_found": probe_label == "inline_main",
-            "drawer_mode": probe_label == "dialog",
+            "inline_filters_found": inline_ok,
+            "drawer_mode": drawer_mode,
             "drawer_info": {
                 "opened": False,
                 "already_visible": True,
-                "selector_used": probe_detail,
-                "attempt_log": [f"probe:{probe_detail}"],
+                "selector_used": probe_detail2,
+                "attempt_log": [f"probe_after_drawer:{probe_detail2}"],
                 "surface": surf,
-                "probe_root_hint": probe_label,
+                "probe_root_hint": probe_label2,
             },
             "discovery_log": discovery_log,
         }
@@ -804,7 +857,11 @@ async def _filters_panel_looks_open(page) -> bool:
 
 
 def _iter_filters_open_locators(page) -> list[tuple[str, Callable[[], Any]]]:
-    """Named selector strategies for opening the Filters UI (order matters: try specific first)."""
+    """Named selector strategies for opening the Filters UI (order matters: try specific first).
+
+    ``text_filters_exact_line`` is last: on category pages it often matches the inline left-rail
+    ``Filters`` heading and is not a drawer control.
+    """
     return [
         (
             "role_button_name_anchors_filters",
@@ -818,10 +875,6 @@ def _iter_filters_open_locators(page) -> list[tuple[str, Callable[[], Any]]]:
         (
             "aria_label_filter",
             lambda: page.locator("[aria-label*='Filter' i], [aria-label*='filter' i]").first,
-        ),
-        (
-            "text_filters_exact_line",
-            lambda: page.get_by_text(re.compile(r"^filters?$", re.I)),
         ),
         (
             "div_role_button_filter_text",
@@ -844,6 +897,10 @@ def _iter_filters_open_locators(page) -> list[tuple[str, Callable[[], Any]]]:
         (
             "all_filters_text",
             lambda: page.get_by_text(re.compile(r"\ball\s+filters?\b", re.I)),
+        ),
+        (
+            "text_filters_exact_line",
+            lambda: page.get_by_text(re.compile(r"^filters?$", re.I)),
         ),
     ]
 
@@ -1005,12 +1062,45 @@ async def _verify_date_listed_24h_applied(page, root) -> tuple[bool, str]:
     return False, "no_confirmation_label_visible"
 
 
+async def _wait_for_date_listed_options_surface(page) -> tuple[bool, str]:
+    """After opening Date listed, wait for listbox/menu/popover so options are clickable."""
+    candidates = (
+        '[role="listbox"]',
+        '[role="menu"]',
+        '[data-testid*="listbox" i]',
+        '[aria-haspopup="listbox"] [role="option"]',
+    )
+    for sel in candidates:
+        try:
+            loc = page.locator(sel).first
+            await loc.wait_for(state="visible", timeout=2800)
+            return True, f"options_surface:{sel}"
+        except Exception:
+            continue
+    await page.wait_for_timeout(400)
+    return False, "options_surface_not_detected_continuing"
+
+
+async def _iter_roots_for_date_listed(root, page) -> list[tuple[str, Any]]:
+    """Ordered scopes: provided root → main → full page (category inline rail often matches main)."""
+    out: list[tuple[str, Any]] = [("filters_root", root)]
+    main = page.locator('[role="main"]')
+    try:
+        if await main.count() > 0:
+            out.append(("role_main", main))
+    except Exception:
+        pass
+    out.append(("page", page))
+    return out
+
+
 async def _set_date_listed_to_24_hours(page, root, *, surface_label: str) -> None:
     """
     Set Date listed → Last 24 hours (or closest label) within ``root`` (dialog or main).
 
     Facebook labels vary (\"24 hours\", \"Last 24 hours\", \"Past day\"); we try several.
-    Logs each step: region visible → Date listed found → clicked → Last 24h → clicked.
+    Searches multiple roots (narrow container, ``[role=main]``, page) so inline rails are not
+    missed when a fallback container omitted controls.
     """
     try:
         if root is page:
@@ -1033,72 +1123,115 @@ async def _set_date_listed_to_24_hours(page, root, *, surface_label: str) -> Non
         re.compile(r"\bdate\b.*\blisted\b", re.I),
     ]
     dl_found_pat: str | None = None
-    # Open the Date listed control (combobox, button, or row).
+    dl_scope_name: str | None = None
+    dl_selector_kind: str | None = None
     opened = False
-    for pat in date_labels:
-        for loc in (
-            root.get_by_role("combobox", name=pat),
-            root.get_by_role("button", name=pat),
-            root.get_by_text(pat),
-        ):
-            try:
-                if await loc.count() < 1:
-                    continue
-                el = loc.first
-                await el.scroll_into_view_if_needed()
-                logger.info(
-                    "Marketplace UI: date_listed_step Date listed control found pattern=%s surface=%s",
-                    pat.pattern,
-                    surface_label,
-                )
-                await el.click()
-                await page.wait_for_timeout(450)
-                dl_found_pat = pat.pattern
-                opened = True
-                logger.info(
-                    "Marketplace UI: date_listed_step Date listed clicked pattern=%s surface=%s",
-                    pat.pattern,
-                    surface_label,
-                )
-                break
-            except Exception:
-                continue
+
+    for scope_name, scope in await _iter_roots_for_date_listed(root, page):
         if opened:
             break
-
-    if not opened:
-        # Broader: any combobox near "date" text in root
-        try:
-            rows = root.locator("div[role='button'], button, [role='combobox'], span[role='button']")
-            n = await rows.count()
-            for i in range(min(n, 60)):
-                el = rows.nth(i)
-                t = (await el.inner_text() or "").strip()
-                if re.search(r"date", t, re.I) and re.search(r"list", t, re.I):
+        logger.info(
+            "Marketplace UI: date_listed_step searching_scope=%s surface=%s",
+            scope_name,
+            surface_label,
+        )
+        for pat in date_labels:
+            for kind, loc in (
+                ("combobox", scope.get_by_role("combobox", name=pat)),
+                ("button", scope.get_by_role("button", name=pat)),
+                ("text", scope.get_by_text(pat)),
+                (
+                    "label",
+                    scope.get_by_label(pat),
+                ),
+            ):
+                try:
+                    if await loc.count() < 1:
+                        continue
+                    el = loc.first
+                    await el.scroll_into_view_if_needed()
                     logger.info(
-                        "Marketplace UI: date_listed_step Date listed found (row scan) text=%r surface=%s",
-                        t[:120],
+                        "Marketplace UI: date_listed_step Date listed control found scope=%s "
+                        "kind=%s pattern=%s surface=%s",
+                        scope_name,
+                        kind,
+                        pat.pattern,
                         surface_label,
                     )
-                    await el.scroll_into_view_if_needed()
                     await el.click()
                     await page.wait_for_timeout(450)
-                    dl_found_pat = "row_scan"
+                    surf_ok, surf_detail = await _wait_for_date_listed_options_surface(page)
+                    logger.info(
+                        "Marketplace UI: date_listed_step after_Date_listed_click options_wait ok=%s "
+                        "detail=%s",
+                        surf_ok,
+                        surf_detail,
+                    )
+                    dl_found_pat = pat.pattern
+                    dl_scope_name = scope_name
+                    dl_selector_kind = kind
                     opened = True
                     logger.info(
-                        "Marketplace UI: date_listed_step Date listed clicked (row scan) surface=%s",
+                        "Marketplace UI: date_listed_step Date listed clicked scope=%s kind=%s "
+                        "pattern=%s surface=%s",
+                        scope_name,
+                        kind,
+                        pat.pattern,
                         surface_label,
                     )
                     break
-        except Exception:
-            pass
+                except Exception:
+                    continue
+            if opened:
+                break
+
+        if not opened:
+            try:
+                rows = scope.locator(
+                    "div[role='button'], button, [role='combobox'], span[role='button'], "
+                    "div[role='combobox']"
+                )
+                n = await rows.count()
+                for i in range(min(n, 80)):
+                    el = rows.nth(i)
+                    t = (await el.inner_text() or "").strip()
+                    if re.search(r"date", t, re.I) and re.search(r"list", t, re.I):
+                        logger.info(
+                            "Marketplace UI: date_listed_step Date listed found (row scan) scope=%s "
+                            "text=%r surface=%s",
+                            scope_name,
+                            t[:120],
+                            surface_label,
+                        )
+                        await el.scroll_into_view_if_needed()
+                        await el.click()
+                        await page.wait_for_timeout(450)
+                        surf_ok, surf_detail = await _wait_for_date_listed_options_surface(page)
+                        logger.info(
+                            "Marketplace UI: date_listed_step after_Date_listed_click options_wait "
+                            "ok=%s detail=%s",
+                            surf_ok,
+                            surf_detail,
+                        )
+                        dl_found_pat = "row_scan"
+                        dl_scope_name = scope_name
+                        dl_selector_kind = "row_scan"
+                        opened = True
+                        logger.info(
+                            "Marketplace UI: date_listed_step Date listed clicked (row scan) "
+                            "scope=%s surface=%s",
+                            scope_name,
+                            surface_label,
+                        )
+                        break
+            except Exception:
+                pass
 
     if not opened:
         raise MarketplaceFilterError(
             f"Date listed control not found in filters region ({surface_label})."
         )
 
-    # Choose a 24-hour option (menu / listbox / dialog).
     hour_patterns = [
         re.compile(r"^\s*24\s*hours?\s*$", re.I),
         re.compile(r"last\s*24\s*hours?", re.I),
@@ -1106,34 +1239,51 @@ async def _set_date_listed_to_24_hours(page, root, *, surface_label: str) -> Non
         re.compile(r"past\s*day", re.I),
         re.compile(r"24\s*h\b", re.I),
         re.compile(r"today|last\s*day", re.I),
+        re.compile(r"last\s+day", re.I),
     ]
     for rx in hour_patterns:
-        for loc in (
-            page.get_by_role("option", name=rx),
-            page.get_by_role("menuitem", name=rx),
-            root.get_by_role("option", name=rx),
-            page.get_by_text(rx),
-        ):
-            try:
-                if await loc.count() < 1:
+        for scope_try in (page, root):
+            scope_label = "page" if scope_try is page else "filters_root"
+            for kind, loc in (
+                ("option", scope_try.get_by_role("option", name=rx)),
+                ("menuitem", scope_try.get_by_role("menuitem", name=rx)),
+                (
+                    "menuitemradio",
+                    scope_try.get_by_role("menuitemradio", name=rx),
+                ),
+                ("radio", scope_try.get_by_role("radio", name=rx)),
+                ("text", scope_try.get_by_text(rx)),
+            ):
+                try:
+                    if await loc.count() < 1:
+                        continue
+                    logger.info(
+                        "Marketplace UI: date_listed_step Last 24 hours option found pattern=%s "
+                        "scope=%s kind=%s surface=%s",
+                        rx.pattern,
+                        scope_label,
+                        kind,
+                        surface_label,
+                    )
+                    await loc.first.click()
+                    await page.wait_for_timeout(500)
+                    last24_scope = scope_label
+                    last24_kind = f"{kind}:{rx.pattern}"
+                    logger.info(
+                        "Marketplace UI: date_listed_step Last 24 hours clicked pattern=%s "
+                        "scope=%s kind=%s date_listed_opened_with=%s date_listed_scope=%s "
+                        "date_listed_kind=%s surface=%s",
+                        rx.pattern,
+                        scope_label,
+                        kind,
+                        dl_found_pat,
+                        dl_scope_name,
+                        dl_selector_kind,
+                        surface_label,
+                    )
+                    return
+                except Exception:
                     continue
-                logger.info(
-                    "Marketplace UI: date_listed_step Last 24 hours option found pattern=%s surface=%s",
-                    rx.pattern,
-                    surface_label,
-                )
-                await loc.first.click()
-                await page.wait_for_timeout(400)
-                logger.info(
-                    "Marketplace UI: date_listed_step Last 24 hours clicked pattern=%s "
-                    "date_listed_opened_with=%s surface=%s",
-                    rx.pattern,
-                    dl_found_pat,
-                    surface_label,
-                )
-                return
-            except Exception:
-                continue
 
     raise MarketplaceFilterError(
         f"Could not select a 24-hour Date listed option ({surface_label})."
