@@ -1,9 +1,10 @@
 """
 Structured Step 1 search plans: Marketplace category browse or keyword searches.
 
-Step 1 uses a path-only Marketplace entry URL (category segment when in marketplace_category mode),
-then applies location, radius, and sort in the browser UI. Custom keyword mode runs each phrase
-via the Marketplace search box (never global Facebook search).
+In marketplace_category mode the browser opens the Marketplace home page first, then selects the
+category from the home UI (so the left-column filter rail matches a normal browse). The category
+slug still maps to ``/marketplace/category/{slug}/`` for verification and logging. Custom keyword
+mode runs each phrase via the Marketplace search box (never global Facebook search).
 """
 
 from __future__ import annotations
@@ -19,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MARKETPLACE_SORT = "creation_time_descend"
 
+# Facebook Marketplace home (no category segment). Category mode enters here, then clicks a tile.
+MARKETPLACE_HOME_URL = "https://www.facebook.com/marketplace/"
+
 MARKETPLACE_SORT_UI_LABEL: dict[str, str] = {
     "creation_time_descend": "Newest first",
 }
@@ -33,7 +37,13 @@ class SearchPlanInvalidError(RuntimeError):
 
 
 def build_marketplace_entry_url(plan: SearchPlan) -> str:
-    """Path-only Marketplace entry URL (no filter query string)."""
+    """
+    Canonical Marketplace path for the plan (no filter query string).
+
+    For marketplace_category mode this is the category URL used to confirm navigation after
+    picking the category from the home page — the worker does not use this as the first ``goto``
+    target when a category slug is set (see ``MARKETPLACE_HOME_URL`` + UI click).
+    """
     base = "https://www.facebook.com"
     if plan.marketplace_category_slug:
         return f"{base}/marketplace/category/{plan.marketplace_category_slug}/"

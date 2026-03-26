@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 from search_context import CollectionInputs
 from search_plan import (
+    MARKETPLACE_HOME_URL,
     MARKETPLACE_SORT_UI_LABEL,
     SearchPlan,
     build_marketplace_entry_url,
@@ -243,6 +244,43 @@ async def _date_listed_text_locator_in_scope(scope):
     return None, "no_date_listed_text_match"
 
 
+async def _left_sidebar_category_filter_rail_visible(page) -> tuple[bool, str]:
+    """
+    Category browse pages: left column often has a visible ``Filters`` heading and ``Date listed``
+    in the same main landmark. Prefer this before drawer-style detection.
+    """
+    main = page.locator('[role="main"]')
+    if await main.count() < 1:
+        return False, "no_main_landmark"
+
+    await _scroll_main_for_filters(page)
+
+    has_filters_heading = False
+    for loc in (
+        main.get_by_role("heading", name=re.compile(r"^filters$", re.I)),
+        main.get_by_text(re.compile(r"^filters$", re.I)),
+    ):
+        try:
+            if await loc.count() < 1:
+                continue
+            el = loc.first
+            if await el.is_visible():
+                has_filters_heading = True
+                break
+        except Exception:
+            continue
+
+    if has_filters_heading:
+        try:
+            dl, pat = await _date_listed_text_locator_in_scope(main)
+            if dl is not None and await _locator_visible_and_enabled(dl):
+                return True, f"category_left_rail:filters_heading+date_listed:{pat}"
+        except Exception:
+            pass
+
+    return False, "category_left_rail_not_matched"
+
+
 async def _left_sidebar_filters_visible(page) -> tuple[bool, str]:
     """
     Desktop category pages often show Filters + Date listed in the main column without a drawer.
@@ -253,6 +291,10 @@ async def _left_sidebar_filters_visible(page) -> tuple[bool, str]:
         return False, "no_main_landmark"
 
     await _scroll_main_for_filters(page)
+
+    ok_rail, rail_detail = await _left_sidebar_category_filter_rail_visible(page)
+    if ok_rail:
+        return True, rail_detail
 
     try:
         dl, _detail = await _date_listed_text_locator_in_scope(main)
@@ -1199,6 +1241,136 @@ async def run_focused_marketplace_query(page, query: str) -> dict[str, Any]:
     return meta
 
 
+async def _navigate_to_category_via_marketplace_home(page, plan: SearchPlan) -> dict[str, Any]:
+    """
+    From Marketplace home, click the configured category tile/link, then wait for the category feed.
+
+    Expects the page to already be on ``MARKETPLACE_HOME_URL`` with shell loaded.
+    """
+    slug = (plan.marketplace_category_slug or "").strip()
+    label = (plan.marketplace_category_label or "").strip()
+    if not slug:
+        raise MarketplaceFilterError("marketplace_category mode requires marketplace_category_slug")
+
+    canonical = build_marketplace_entry_url(plan)
+    meta: dict[str, Any] = {
+        "marketplace_home_entered": True,
+        "marketplace_home_url_at_start": page.url,
+        "url_before_category_click": None,
+        "url_after_category_click": None,
+        "category_tile_selector_used": None,
+        "category_tile_label_clicked": None,
+        "category_navigation_expected_canonical": canonical,
+        "category_page_feed_probe": None,
+    }
+
+    logger.info(
+        "Marketplace UI: marketplace_home_entered user_id=%s url=%s slug=%r label=%r",
+        plan.user_id,
+        page.url,
+        slug,
+        label,
+    )
+
+    try:
+        await page.wait_for_selector(
+            'a[href*="/marketplace/category/"]',
+            timeout=45_000,
+        )
+    except Exception as exc:
+        raise MarketplaceFilterError(
+            "Marketplace home did not show category links (/marketplace/category/) within timeout."
+        ) from exc
+
+    logger.info(
+        "Marketplace UI: marketplace_home_category_tiles_loaded user_id=%s",
+        plan.user_id,
+    )
+
+    href_needle = f"/marketplace/category/{slug}"
+    tile_loc = page.locator(f'a[href*="{href_needle}"]')
+    tile = None
+    selector_used: str | None = None
+
+    if await tile_loc.count() > 0:
+        tile = tile_loc.first
+        selector_used = f'css=a[href*="{href_needle}"]'
+    elif label:
+        try:
+            by_label = page.get_by_role("link", name=re.compile(re.escape(label), re.I))
+            if await by_label.count() > 0:
+                tile = by_label.first
+                selector_used = f"role=link:name_regex={label!r}"
+        except Exception:
+            pass
+
+    if tile is None:
+        raise MarketplaceFilterError(
+            f"Could not find category tile for slug={slug!r} label={label!r} on Marketplace home."
+        )
+
+    meta["category_tile_selector_used"] = selector_used
+
+    url_before = page.url
+    meta["url_before_category_click"] = url_before
+
+    try:
+        cat_text = (await tile.inner_text() or "").strip()
+    except Exception:
+        cat_text = ""
+    meta["category_tile_label_clicked"] = cat_text or label or slug
+
+    logger.info(
+        "Marketplace UI: category_tile_click_prepare user_id=%s url_before=%s slug=%r label=%r "
+        "selector=%s tile_text=%r",
+        plan.user_id,
+        url_before,
+        slug,
+        label,
+        selector_used,
+        meta["category_tile_label_clicked"],
+    )
+
+    await tile.scroll_into_view_if_needed()
+    await page.wait_for_timeout(200)
+    await tile.click()
+
+    try:
+        await page.wait_for_url(
+            lambda u: f"/marketplace/category/{slug}" in (u or "").lower(),
+            timeout=25_000,
+        )
+    except Exception:
+        await page.wait_for_load_state("domcontentloaded")
+        await page.wait_for_timeout(1200)
+
+    meta["url_after_category_click"] = page.url
+    logger.info(
+        "Marketplace UI: category_page_after_tile_click user_id=%s url_before=%s url_after=%s",
+        plan.user_id,
+        url_before,
+        meta["url_after_category_click"],
+    )
+
+    if f"/marketplace/category/{slug}" not in page.url.lower():
+        raise MarketplaceFilterError(
+            f"After category tile click, URL did not contain /marketplace/category/{slug}: {page.url!r}"
+        )
+
+    await _wait_for_marketplace_shell(page)
+    await page.wait_for_timeout(500)
+    probe_name, probe_count = await wait_for_any_item_link(page, timeout_ms=28_000)
+    meta["category_page_feed_probe"] = {"selector": probe_name, "count": probe_count}
+    logger.info(
+        "Marketplace UI: category_page_feed_ready user_id=%s url=%s probe=%s",
+        plan.user_id,
+        page.url,
+        meta["category_page_feed_probe"],
+    )
+
+    return meta
+
+
 async def apply_marketplace_filters_ui(
     page,
     plan: SearchPlan,
@@ -1206,31 +1378,60 @@ async def apply_marketplace_filters_ui(
     collection_inputs: CollectionInputs,
 ) -> dict[str, Any]:
     """
-    Navigate to Marketplace (category path only), then set location, radius, and sort via UI.
+    Navigate to Marketplace, then set location, radius, sort, and (category mode) Date listed via UI.
 
-    Category context: path-only ``/marketplace/category/{slug}/`` when ``plan.marketplace_category_slug`` is set; otherwise ``/marketplace/``.
+    In ``marketplace_category`` mode with a slug, the first navigation is the Marketplace **home**
+    page; the category is opened by clicking the home-page tile (not a direct ``goto`` to
+    ``/marketplace/category/{slug}/``). Canonical category URL is still tracked for verification.
     """
-    entry_url = build_marketplace_entry_url(plan)
-    logger.info(
-        "Marketplace UI: navigating to entry (path-only, no filter query string) user_id=%s url=%s",
-        plan.user_id,
-        entry_url,
+    canonical_category_url = build_marketplace_entry_url(plan)
+    sm_cat = (plan.search_mode or "").strip() == "marketplace_category"
+    use_home_then_tile = bool(
+        sm_cat and (plan.marketplace_category_slug or "").strip()
     )
+
+    if use_home_then_tile:
+        entry_url = MARKETPLACE_HOME_URL
+        logger.info(
+            "Marketplace UI: navigating to Marketplace HOME first (category=%r via UI next) "
+            "user_id=%s url=%s canonical_category_url=%s",
+            plan.marketplace_category_slug,
+            plan.user_id,
+            entry_url,
+            canonical_category_url,
+        )
+    else:
+        entry_url = canonical_category_url
+        logger.info(
+            "Marketplace UI: navigating to entry (path-only, no filter query string) user_id=%s url=%s",
+            plan.user_id,
+            entry_url,
+        )
+
     await page.goto(entry_url, wait_until="domcontentloaded")
     await _wait_for_marketplace_shell(page)
+
+    home_nav_meta: dict[str, Any] | None = None
+    if use_home_then_tile:
+        home_nav_meta = await _navigate_to_category_via_marketplace_home(page, plan)
+
     try:
         _title = await page.title()
     except Exception:
         _title = ""
     logger.info(
-        "Marketplace UI: category_page_entered user_id=%s url=%s title=%r",
+        "Marketplace UI: category_page_entered user_id=%s url=%s title=%r via_home=%s",
         plan.user_id,
         page.url,
         _title,
+        use_home_then_tile,
     )
 
     applied: dict[str, Any] = {
         "entry_url": entry_url,
+        "canonical_category_url": canonical_category_url,
+        "category_entry_via_home": use_home_then_tile,
+        "marketplace_home_nav_meta": home_nav_meta,
         "category_slug": plan.marketplace_category_slug,
         "location_text": (plan.location_text or "").strip(),
         "radius_miles_requested": round(plan.radius_miles, 2),
@@ -1262,8 +1463,6 @@ async def apply_marketplace_filters_ui(
         "filters_surface_narrow_detail": None,
         "left_side_filters_wait": None,
     }
-
-    sm_cat = (plan.search_mode or "").strip() == "marketplace_category"
 
     # Location + radius (required for meaningful geo-scoped search).
     await _open_location_dialog(page, plan)
