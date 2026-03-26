@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any, Callable
+from urllib.parse import parse_qs, unquote_plus, urlparse
 
 from search_context import CollectionInputs
 from search_plan import (
@@ -54,6 +56,144 @@ def _sort_label_for_plan(plan: SearchPlan) -> str:
             f"Unsupported sort_mode={plan.sort_mode!r}; add a MARKETPLACE_SORT_UI_LABEL entry."
         )
     return label
+
+
+def _url_query_dict(url: str) -> dict[str, str]:
+    """Flatten first value per query key (Facebook uses single-value params)."""
+    qs = urlparse(url or "").query
+    raw = parse_qs(qs, keep_blank_values=True)
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if v:
+            out[k] = unquote_plus(v[0] or "")
+    return out
+
+
+def _evaluate_category_entry_signals(
+    plan: SearchPlan,
+    url: str,
+    page_title: str | None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """
+    Decide whether navigation landed on a plausible Marketplace category/browse view.
+
+    Accepts canonical ``/marketplace/category/{slug}/``, regional search URLs with ``category_id``,
+    and search URLs whose ``query`` matches the category label or slug (Facebook often redirects
+    tiles to ``/marketplace/<region>/search/?...``).
+    """
+    slug = (plan.marketplace_category_slug or "").strip().lower()
+    label = (plan.marketplace_category_label or "").strip()
+    u = (url or "").lower()
+    signals: dict[str, Any] = {"url_sample": (url or "")[:500]}
+
+    if not is_facebook_marketplace_url(url):
+        return False, "url_not_inside_facebook_marketplace", signals
+
+    signals["still_on_marketplace"] = True
+
+    if slug and f"/marketplace/category/{slug}" in u:
+        signals["canonical_category_path"] = True
+        return True, "canonical_category_path_in_url", signals
+
+    qd = _url_query_dict(url)
+    if qd.get("category_id", "").strip():
+        signals["category_id"] = qd["category_id"].strip()
+        return True, "marketplace_url_has_category_id_query_param", signals
+
+    q_raw = (qd.get("query") or "").strip()
+    if q_raw:
+        qv = unquote_plus(q_raw).lower()
+        signals["query_param"] = qv
+        if slug:
+            slug_words = slug.replace("-", " ").split()
+            if slug in qv or slug.replace("-", " ") in qv:
+                return True, "search_query_param_matches_category_slug", signals
+            for sw in slug_words:
+                if len(sw) > 2 and sw in qv:
+                    return True, "search_query_param_contains_slug_token", signals
+        if label:
+            lv = label.lower()
+            if lv in qv:
+                return True, "search_query_param_matches_category_label", signals
+            for w in re.findall(r"[a-z0-9]+", lv):
+                if len(w) > 3 and w in qv:
+                    return True, "search_query_param_matches_label_word", signals
+
+    u_path = urlparse(url or "").path.lower()
+    if slug and slug in u_path and "/marketplace" in u:
+        return True, "url_path_contains_category_slug_segment", signals
+
+    t = (page_title or "").lower()
+    signals["page_title_sample"] = (page_title or "")[:200]
+    if label and label.lower() in t:
+        return True, "page_title_contains_category_label", signals
+    if slug and slug.replace("-", " ") in t:
+        return True, "page_title_contains_slug_as_words", signals
+
+    if "/search" in u or "search?" in u:
+        signals["marketplace_search_shape"] = True
+
+    return False, "no_recognized_category_entry_signal", signals
+
+
+async def _wait_for_url_change_after_click(
+    page, url_before: str, *, timeout_ms: int = 26_000
+) -> None:
+    """Wait until SPA updates the URL or timeout; avoids assuming a single path shape."""
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    while time.monotonic() < deadline:
+        try:
+            cur = page.url
+        except Exception:
+            cur = url_before
+        if cur != url_before:
+            await page.wait_for_load_state("domcontentloaded")
+            await page.wait_for_timeout(700)
+            return
+        await page.wait_for_timeout(220)
+    await page.wait_for_load_state("domcontentloaded")
+    await page.wait_for_timeout(1200)
+
+
+async def _confirm_location_applied(page, plan: SearchPlan) -> tuple[bool, str]:
+    """
+    Best-effort confirmation after filling the location dialog: dialog closed and shell visible.
+    """
+    loc_text = (plan.location_text or "").strip()
+    for _ in range(24):
+        dlg = page.locator('[role="dialog"]')
+        try:
+            n = await dlg.count()
+        except Exception:
+            n = 0
+        if n < 1:
+            break
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        await page.wait_for_timeout(200)
+    try:
+        await page.wait_for_load_state("domcontentloaded")
+    except Exception:
+        pass
+    await page.wait_for_timeout(350)
+    try:
+        await page.wait_for_selector(
+            'main, [role="main"]',
+            timeout=12_000,
+        )
+    except Exception:
+        return False, "main_landmark_not_visible_after_location_dialog"
+    if loc_text:
+        snippet = loc_text[:min(16, len(loc_text))]
+        try:
+            chip = page.get_by_text(re.compile(re.escape(snippet), re.I))
+            if await chip.count() > 0:
+                return True, f"location_summary_visible:{snippet!r}"
+        except Exception:
+            pass
+    return True, "location_dialog_closed_main_visible"
 
 
 async def _wait_for_marketplace_shell(page) -> None:
@@ -1241,13 +1381,47 @@ async def run_focused_marketplace_query(page, query: str) -> dict[str, Any]:
     return meta
 
 
+async def _finalize_category_entry_validation(
+    page,
+    plan: SearchPlan,
+    *,
+    url_after: str,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Combine URL/title heuristics with an optional feed probe when the URL shape is ambiguous."""
+    title = ""
+    try:
+        title = await page.title()
+    except Exception:
+        pass
+    ok, reason, sigs = _evaluate_category_entry_signals(plan, url_after, title)
+    if ok:
+        return ok, reason, sigs
+    probe_name, probe_count = await wait_for_any_item_link(page, timeout_ms=10_000)
+    sigs = dict(sigs)
+    sigs["feed_probe_fallback"] = {"selector": probe_name, "count": probe_count}
+    ua = (url_after or "").lower()
+    if (
+        probe_count
+        and is_facebook_marketplace_url(url_after)
+        and ("/search" in ua or "category_id" in ua or "query=" in ua)
+    ):
+        return (
+            True,
+            "supplemental_feed_visible_on_marketplace_search_shaped_url",
+            sigs,
+        )
+    return False, reason, sigs
+
+
 async def _navigate_to_category_via_marketplace_home(page, plan: SearchPlan) -> dict[str, Any]:
     """
     From Marketplace home, click the configured category tile/link, then wait for the category feed.
 
-    Expects the page to already be on ``MARKETPLACE_HOME_URL`` with shell loaded.
+    Expects the page to already be on ``MARKETPLACE_HOME_URL`` with shell loaded and location
+    already applied so results use the user's geo.
     """
     slug = (plan.marketplace_category_slug or "").strip()
+    slug_l = slug.lower()
     label = (plan.marketplace_category_label or "").strip()
     if not slug:
         raise MarketplaceFilterError("marketplace_category mode requires marketplace_category_slug")
@@ -1262,10 +1436,14 @@ async def _navigate_to_category_via_marketplace_home(page, plan: SearchPlan) -> 
         "category_tile_label_clicked": None,
         "category_navigation_expected_canonical": canonical,
         "category_page_feed_probe": None,
+        "category_navigation_accepted": False,
+        "category_navigation_reason": None,
+        "category_navigation_signals": None,
+        "page_title_after_category_click": None,
     }
 
     logger.info(
-        "Marketplace UI: marketplace_home_entered user_id=%s url=%s slug=%r label=%r",
+        "Marketplace UI: category_tile_navigation_start user_id=%s url=%s slug=%r label=%r",
         plan.user_id,
         page.url,
         slug,
@@ -1274,12 +1452,14 @@ async def _navigate_to_category_via_marketplace_home(page, plan: SearchPlan) -> 
 
     try:
         await page.wait_for_selector(
-            'a[href*="/marketplace/category/"]',
+            'a[href*="/marketplace/category/"], a[href*="category_id"], '
+            'a[href*="/marketplace/"][href*="search"]',
             timeout=45_000,
         )
     except Exception as exc:
         raise MarketplaceFilterError(
-            "Marketplace home did not show category links (/marketplace/category/) within timeout."
+            "Marketplace home did not show category or search tiles (category links, category_id, "
+            "or marketplace search) within timeout."
         ) from exc
 
     logger.info(
@@ -1287,7 +1467,7 @@ async def _navigate_to_category_via_marketplace_home(page, plan: SearchPlan) -> 
         plan.user_id,
     )
 
-    href_needle = f"/marketplace/category/{slug}"
+    href_needle = f"/marketplace/category/{slug_l}"
     tile_loc = page.locator(f'a[href*="{href_needle}"]')
     tile = None
     selector_used: str | None = None
@@ -1303,6 +1483,16 @@ async def _navigate_to_category_via_marketplace_home(page, plan: SearchPlan) -> 
                 selector_used = f"role=link:name_regex={label!r}"
         except Exception:
             pass
+        if tile is None:
+            try:
+                search_labeled = page.locator(
+                    'a[href*="/marketplace/"][href*="search"]'
+                ).filter(has_text=re.compile(re.escape(label), re.I))
+                if await search_labeled.count() > 0:
+                    tile = search_labeled.first
+                    selector_used = f"css=marketplace_search_link+label={label!r}"
+            except Exception:
+                pass
 
     if tile is None:
         raise MarketplaceFilterError(
@@ -1321,7 +1511,7 @@ async def _navigate_to_category_via_marketplace_home(page, plan: SearchPlan) -> 
     meta["category_tile_label_clicked"] = cat_text or label or slug
 
     logger.info(
-        "Marketplace UI: category_tile_click_prepare user_id=%s url_before=%s slug=%r label=%r "
+        "Marketplace UI: category_tile_clicked user_id=%s url_before=%s slug=%r label=%r "
         "selector=%s tile_text=%r",
         plan.user_id,
         url_before,
@@ -1335,26 +1525,50 @@ async def _navigate_to_category_via_marketplace_home(page, plan: SearchPlan) -> 
     await page.wait_for_timeout(200)
     await tile.click()
 
-    try:
-        await page.wait_for_url(
-            lambda u: f"/marketplace/category/{slug}" in (u or "").lower(),
-            timeout=25_000,
-        )
-    except Exception:
-        await page.wait_for_load_state("domcontentloaded")
-        await page.wait_for_timeout(1200)
+    await _wait_for_url_change_after_click(page, url_before, timeout_ms=26_000)
 
     meta["url_after_category_click"] = page.url
+    try:
+        meta["page_title_after_category_click"] = await page.title()
+    except Exception:
+        meta["page_title_after_category_click"] = None
+
     logger.info(
-        "Marketplace UI: category_page_after_tile_click user_id=%s url_before=%s url_after=%s",
+        "Marketplace UI: category_navigation_url_after_click user_id=%s url_before=%s url_after=%s "
+        "title=%r",
         plan.user_id,
         url_before,
         meta["url_after_category_click"],
+        meta["page_title_after_category_click"],
     )
 
-    if f"/marketplace/category/{slug}" not in page.url.lower():
+    ok, reason, sigs = await _finalize_category_entry_validation(
+        page, plan, url_after=meta["url_after_category_click"]
+    )
+    meta["category_navigation_accepted"] = ok
+    meta["category_navigation_reason"] = reason
+    meta["category_navigation_signals"] = sigs
+
+    if ok:
+        logger.info(
+            "Marketplace UI: category_navigation_accepted user_id=%s reason=%r signals=%s",
+            plan.user_id,
+            reason,
+            sigs,
+        )
+    else:
+        logger.error(
+            "Marketplace UI: category_navigation_rejected user_id=%s reason=%r url=%r title=%r "
+            "signals=%s",
+            plan.user_id,
+            reason,
+            meta["url_after_category_click"],
+            meta["page_title_after_category_click"],
+            sigs,
+        )
         raise MarketplaceFilterError(
-            f"After category tile click, URL did not contain /marketplace/category/{slug}: {page.url!r}"
+            f"Category navigation did not match a recognized Marketplace category/search state "
+            f"({reason}). url={meta['url_after_category_click']!r} title={meta['page_title_after_category_click']!r}"
         )
 
     await _wait_for_marketplace_shell(page)
@@ -1380,9 +1594,10 @@ async def apply_marketplace_filters_ui(
     """
     Navigate to Marketplace, then set location, radius, sort, and (category mode) Date listed via UI.
 
-    In ``marketplace_category`` mode with a slug, the first navigation is the Marketplace **home**
-    page; the category is opened by clicking the home-page tile (not a direct ``goto`` to
-    ``/marketplace/category/{slug}/``). Canonical category URL is still tracked for verification.
+    In ``marketplace_category`` mode with a slug, the flow is: Marketplace **home** → apply
+    **location/radius** in the header dialog → click the category tile → validate flexible category
+    URL/title signals → filters (Date listed) → sort. Canonical ``/marketplace/category/{slug}/`` is
+    tracked for logging only; Facebook may route tiles to regional search URLs.
     """
     canonical_category_url = build_marketplace_entry_url(plan)
     sm_cat = (plan.search_mode or "").strip() == "marketplace_category"
@@ -1412,7 +1627,34 @@ async def apply_marketplace_filters_ui(
     await _wait_for_marketplace_shell(page)
 
     home_nav_meta: dict[str, Any] | None = None
+    location_confirm_detail: str | None = None
+
     if use_home_then_tile:
+        logger.info(
+            "Marketplace UI: marketplace_home_entered user_id=%s url=%s slug=%r label=%r",
+            plan.user_id,
+            page.url,
+            plan.marketplace_category_slug,
+            plan.marketplace_category_label,
+        )
+        logger.info(
+            "Marketplace UI: location_apply_started user_id=%s primary_location=%r",
+            plan.user_id,
+            collection_inputs.primary_search_location,
+        )
+        await _open_location_dialog(page, plan)
+        await _fill_location_and_radius_in_dialog(page, plan)
+        loc_ok, location_confirm_detail = await _confirm_location_applied(page, plan)
+        logger.info(
+            "Marketplace UI: location_apply_confirmed user_id=%s ok=%s detail=%s",
+            plan.user_id,
+            loc_ok,
+            location_confirm_detail,
+        )
+        if not loc_ok:
+            raise MarketplaceFilterError(
+                f"Location could not be confirmed after applying: {location_confirm_detail}"
+            )
         home_nav_meta = await _navigate_to_category_via_marketplace_home(page, plan)
 
     try:
@@ -1427,6 +1669,26 @@ async def apply_marketplace_filters_ui(
         use_home_then_tile,
     )
 
+    if not use_home_then_tile:
+        logger.info(
+            "Marketplace UI: location_apply_started user_id=%s primary_location=%r",
+            plan.user_id,
+            collection_inputs.primary_search_location,
+        )
+        await _open_location_dialog(page, plan)
+        await _fill_location_and_radius_in_dialog(page, plan)
+        loc_ok, location_confirm_detail = await _confirm_location_applied(page, plan)
+        logger.info(
+            "Marketplace UI: location_apply_confirmed user_id=%s ok=%s detail=%s",
+            plan.user_id,
+            loc_ok,
+            location_confirm_detail,
+        )
+        if not loc_ok:
+            raise MarketplaceFilterError(
+                f"Location could not be confirmed after applying: {location_confirm_detail}"
+            )
+
     applied: dict[str, Any] = {
         "entry_url": entry_url,
         "canonical_category_url": canonical_category_url,
@@ -1438,7 +1700,9 @@ async def apply_marketplace_filters_ui(
         "radius_miles_snapped": _snap_radius_miles(plan.radius_miles),
         "sort_mode": plan.sort_mode,
         "sort_ui_label": _sort_label_for_plan(plan),
-        "location_radius_ok": False,
+        "location_radius_ok": True,
+        "location_radius_ui": "applied",
+        "location_apply_confirm_detail": location_confirm_detail,
         "filters_drawer_opened": False,
         "filters_drawer_already_visible": False,
         "filters_drawer_selector": None,
@@ -1464,16 +1728,12 @@ async def apply_marketplace_filters_ui(
         "left_side_filters_wait": None,
     }
 
-    # Location + radius (required for meaningful geo-scoped search).
-    await _open_location_dialog(page, plan)
-    await _fill_location_and_radius_in_dialog(page, plan)
-    applied["location_radius_ui"] = "applied"
-    applied["location_radius_ok"] = True
     logger.info(
-        "Marketplace UI: location/radius OK user_id=%s primary=%r snapped=%s mi",
+        "Marketplace UI: location/radius OK user_id=%s primary=%r snapped=%s mi confirm=%s",
         plan.user_id,
         collection_inputs.primary_search_location,
         applied["radius_miles_snapped"],
+        location_confirm_detail,
     )
 
     if sm_cat:
@@ -1490,8 +1750,17 @@ async def apply_marketplace_filters_ui(
 
     ls_vis, ls_reason = await _left_sidebar_filters_visible(page)
     logger.info(
-        "Marketplace UI: after_location left_sidebar_filter_section user_id=%s visible=%s detail=%s",
+        "Marketplace UI: after_category_entry left_sidebar_filter_section user_id=%s visible=%s "
+        "detail=%s",
         plan.user_id,
+        ls_vis,
+        ls_reason,
+    )
+    logger.info(
+        "Marketplace UI: left_side_filters_summary user_id=%s left_side_filters_wait=%s "
+        "left_sidebar_filters_visible=%s left_sidebar_detail=%s",
+        plan.user_id,
+        applied.get("left_side_filters_wait"),
         ls_vis,
         ls_reason,
     )
@@ -1585,12 +1854,14 @@ async def apply_marketplace_filters_ui(
             # Truth: only claim 24h filter applied when DOM confirms it (do not pretend).
             applied["date_listed_24h_selected"] = bool(ok)
             if ok:
+                applied["date_listed_skipped_reason"] = None
                 logger.info(
                     "Marketplace UI: date_listed_filter_success_confirmed user_id=%s verify_detail=%s",
                     plan.user_id,
                     detail,
                 )
             else:
+                applied["date_listed_skipped_reason"] = f"verify_failed: {detail}"
                 logger.warning(
                     "Marketplace UI: date_listed_clicks_done_but_verify_failed user_id=%s "
                     "verify_detail=%s — not treating as applied",
@@ -1610,6 +1881,7 @@ async def apply_marketplace_filters_ui(
         except Exception as exc:
             err_s = f"{type(exc).__name__}: {str(exc)[:400]}"
             applied["date_listed_error"] = err_s
+            applied["date_listed_skipped_reason"] = err_s
             if "Date listed control not found" in str(exc):
                 applied["date_listed_section_found"] = False
             elif "Could not select a 24-hour" in str(exc) or "24-hour" in str(exc):

@@ -1,9 +1,10 @@
 """
 Structured Step 1 search plans: Marketplace category browse or keyword searches.
 
-In marketplace_category mode the browser opens the Marketplace home page first, then selects the
-category from the home UI (so the left-column filter rail matches a normal browse). The category
-slug still maps to ``/marketplace/category/{slug}/`` for verification and logging. Custom keyword
+In marketplace_category mode the browser opens the Marketplace home page first, applies
+location/radius, then selects the category from the home UI. Category entry is validated with
+flexible URL/title signals (including regional ``/marketplace/.../search/?category_id=...`` URLs),
+not only ``/marketplace/category/{slug}/``. Custom keyword
 mode runs each phrase via the Marketplace search box (never global Facebook search).
 """
 
@@ -40,9 +41,9 @@ def build_marketplace_entry_url(plan: SearchPlan) -> str:
     """
     Canonical Marketplace path for the plan (no filter query string).
 
-    For marketplace_category mode this is the category URL used to confirm navigation after
-    picking the category from the home page — the worker does not use this as the first ``goto``
-    target when a category slug is set (see ``MARKETPLACE_HOME_URL`` + UI click).
+    For marketplace_category mode this is the canonical category path for logging; navigation after
+    the home-page tile may be a regional search URL. The first ``goto`` uses ``MARKETPLACE_HOME_URL``
+    plus location, then the tile click.
     """
     base = "https://www.facebook.com"
     if plan.marketplace_category_slug:
