@@ -40,6 +40,9 @@ def _listing_from_doc(doc: dict) -> Listing:
     scraped = doc.get("scraped_at")
     sent_at = doc.get("alert_sent_at")
 
+    sm = doc.get("scrape_metadata")
+    scrape_meta = sm if isinstance(sm, dict) else None
+
     return Listing(
         id=int(doc["id"]),
         user_id=int(doc["user_id"]),
@@ -68,6 +71,7 @@ def _listing_from_doc(doc: dict) -> Listing:
         scraped_at=scraped if isinstance(scraped, datetime) else None,
         alert_sent_at=sent_at if isinstance(sent_at, datetime) else None,
         alert_last_error=str(doc["alert_last_error"]) if doc.get("alert_last_error") else None,
+        scrape_metadata=scrape_meta,
     )
 
 
@@ -107,6 +111,7 @@ class ListingRepository:
         alert_sent: bool = False,
         alert_sent_at: datetime | None = None,
         alert_last_error: str | None = None,
+        scrape_metadata: dict | None = None,
     ) -> Listing | None:
         """Insert listing; returns None if duplicate (user_id + source_url)."""
         lid = next_sequence(self.db, "listings")
@@ -143,6 +148,8 @@ class ListingRepository:
             "reasoning": reasoning,
             "should_alert": should_alert,
         }
+        if scrape_metadata:
+            doc["scrape_metadata"] = scrape_metadata
         try:
             self.db["listings"].insert_one(doc)
         except DuplicateKeyError:

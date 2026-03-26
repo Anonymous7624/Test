@@ -4,7 +4,7 @@ Mock scraper — replace with real HTTP/HTML parsers per source.
 
 import random
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -22,6 +22,13 @@ class RawListing:
     source_id: str | None = None
     # When harvest parses a city/line from the card (distinct from search region when possible).
     listing_location_parsed: str | None = None
+    # Optional detail-page enrichment (Facebook item view).
+    title_full: str | None = None
+    brand: str | None = None
+    condition: str | None = None
+    listing_location_detail: str | None = None
+    image_urls: list[str] = field(default_factory=list)
+    detail_enriched: bool = False
 
 
 def _pick_location(primary: str, areas: list[str]) -> str:

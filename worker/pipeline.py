@@ -156,6 +156,11 @@ def normalized_from_candidate(c: CandidateListing) -> NormalizedListing:
 def _condition_from_metadata(raw_metadata: dict) -> str:
     if not isinstance(raw_metadata, dict):
         return ""
+    ls = raw_metadata.get("listing_scrape")
+    if isinstance(ls, dict):
+        v = ls.get("condition")
+        if v and str(v).strip():
+            return str(v).strip()[:500]
     for key in ("condition", "item_condition", "condition_text"):
         v = raw_metadata.get(key)
         if v and str(v).strip():
@@ -286,10 +291,10 @@ def process_batch(
     ai_cap = _env_int("WORKER_STEP3_AI_CAP", 50)
     strong_min_strength = _env_float("WORKER_OLLAMA_STRONG_MIN_STRENGTH", 0.72)
     strong_min_hprofit = _env_float("WORKER_OLLAMA_STRONG_MIN_HEURISTIC_PROFIT", 25.0)
-    base_timeout = float(settings.ollama_timeout or 240.0)
+    base_timeout = float(settings.ollama_timeout or 300.0)
     strong_bonus = float(getattr(settings, "ollama_timeout_strong_bonus", 30.0))
     # Must be >= base_timeout + strong_bonus or HTTP budget is capped below Ollama settings.
-    per_candidate_max = _env_float("WORKER_STEP3_AI_CANDIDATE_MAX_SECONDS", 600.0)
+    per_candidate_max = _env_float("WORKER_STEP3_AI_CANDIDATE_MAX_SECONDS", 660.0)
     heartbeat_sec = _env_float("WORKER_STEP3_HEARTBEAT_SECONDS", 15.0)
 
     logger.info(
@@ -369,6 +374,17 @@ def process_batch(
 
             if use_ollama_slot:
                 try:
+                    logger.info(
+                        "Step 3 Ollama invocation starting user_id=%s rank=%s/%s timeout_seconds=%.1f "
+                        "per_candidate_cap=%.1f strong=%s title=%s",
+                        profile.user_id,
+                        idx + 1,
+                        len(ai_jobs),
+                        timeout,
+                        per_candidate_max,
+                        is_strong,
+                        norm.title[:100],
+                    )
                     score = score_matched_candidate(
                         step3_input,
                         timeout_seconds=timeout,
@@ -396,6 +412,8 @@ def process_batch(
                             "model": None,
                             "scoring_error": str(exc)[:500],
                             "used_ollama": False,
+                            "scoring_source": "heuristic_fallback",
+                            "fallback_reason": "worker_step3_exception",
                         },
                     )
                 finally:
@@ -421,13 +439,18 @@ def process_batch(
                         "model": None,
                         "used_ollama": False,
                         "skipped_ollama_due_to_cap": True,
+                        "scoring_source": "heuristic_fallback",
+                        "fallback_reason": "ai_cap_exceeded",
                     },
                 )
 
             fallback_used = not score.used_ollama
+            src = (score.ai_result or {}).get("scoring_source")
+            fb_reason = (score.ai_result or {}).get("fallback_reason")
             logger.info(
                 "Step 3 user_id=%s rank=%s/%s priority_pre_strength=%.3f heuristic_profit=%.2f "
-                "ollama_slot=%s timeout=%.1f cap=%.1f strong=%s used_ollama=%s fallback=%s",
+                "ollama_slot=%s timeout=%.1f cap=%.1f strong=%s used_ollama=%s fallback=%s "
+                "scoring_source=%s fallback_reason=%s",
                 profile.user_id,
                 idx + 1,
                 len(ai_jobs),
@@ -439,7 +462,18 @@ def process_batch(
                 is_strong,
                 score.used_ollama,
                 fallback_used,
+                src,
+                fb_reason,
             )
+            if fallback_used and use_ollama_slot:
+                logger.warning(
+                    "Step 3: Ollama did not produce the winning score — heuristic fallback only "
+                    "user_id=%s rank=%s fallback_reason=%s scoring_error=%s",
+                    profile.user_id,
+                    idx + 1,
+                    fb_reason,
+                    ((score.ai_result or {}).get("scoring_error") or "")[:220],
+                )
 
             step3_scored += 1
             profile.worker_count_step3_scored = step3_scored
@@ -477,6 +511,10 @@ def process_batch(
                 init_alert_err = None
 
             try:
+                _meta = c.raw_metadata or {}
+                _ls = _meta.get("listing_scrape")
+                _scrape_meta = _ls if isinstance(_ls, dict) else None
+
                 created = repo.create(
                     user_id=profile.user_id,
                     source_url=norm.source_url,
@@ -503,6 +541,7 @@ def process_batch(
                     alert_sent=False,
                     alert_sent_at=None,
                     alert_last_error=init_alert_err,
+                    scrape_metadata=_scrape_meta,
                 )
             except Exception as exc:  # noqa: BLE001
                 profile.worker_pipeline_error = f"Save listing failed: {str(exc)[:400]}"

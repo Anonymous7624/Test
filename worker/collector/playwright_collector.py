@@ -17,6 +17,7 @@ import asyncio
 import logging
 import os
 import re
+from dataclasses import replace
 from pathlib import Path
 
 from mock_scraper import RawListing
@@ -423,6 +424,168 @@ async def _harvest_visible_marketplace_cards(
     return strategy_name, out
 
 
+def _strip_noise(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def _brand_condition_from_text(text: str) -> tuple[str | None, str | None]:
+    brand = None
+    m = re.search(r"Brand\s*[:\s]+\s*([^\n\r]+)", text, re.I)
+    if m:
+        brand = _strip_noise(m.group(1))[:200]
+    cond = None
+    m = re.search(r"Condition\s*[:\s]+\s*([^\n\r]+)", text, re.I)
+    if m:
+        cond = _strip_noise(m.group(1))[:200]
+    if not cond:
+        for tok in (
+            "New",
+            "Used - Like New",
+            "Used - Good",
+            "Used - Fair",
+            "Used - Excellent",
+            "Open box",
+        ):
+            if re.search(rf"(?:^|\s){re.escape(tok)}(?:\s|$)", text, re.I):
+                cond = tok
+                break
+    return brand, cond
+
+
+def _description_blob_from_text(text: str, title: str) -> str:
+    t = (text or "").strip()
+    for m in re.finditer(
+        r"(?:Description|About this item|Details)\s*\n+([\s\S]{40,12000}?)(?=\n\s*\n(?:Seller|Location|Condition|Brand|Message)|$)",
+        t,
+        re.I,
+    ):
+        blob = m.group(1).strip()
+        if len(blob) >= 40:
+            return blob[:8000]
+    paras = [p.strip() for p in re.split(r"\n{2,}", t) if len(p.strip()) > 60]
+    best = ""
+    for p in paras:
+        if title and len(title) > 8 and title[:30].lower() in p.lower()[:120]:
+            continue
+        if len(p) > len(best):
+            best = p
+    return best[:8000] if best else ""
+
+
+async def _collect_image_urls_from_page(page, limit: int = 8) -> list[str]:
+    urls: list[str] = []
+    try:
+        for img in await page.query_selector_all('[role="main"] img, img'):
+            src = await img.get_attribute("src")
+            if not src or not src.startswith("http"):
+                continue
+            if "emoji" in src or "/static" in src.lower():
+                continue
+            if src not in urls:
+                urls.append(src)
+            if len(urls) >= limit:
+                break
+    except Exception:
+        pass
+    return urls[:limit]
+
+
+async def _enrich_one_raw_listing(page, raw: RawListing) -> RawListing:
+    url = (raw.source_link or "").strip()
+    if not url or "marketplace/item" not in url:
+        return raw
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=55_000)
+        await page.wait_for_timeout(650)
+        await page.wait_for_load_state("domcontentloaded")
+    except Exception:
+        return raw
+
+    text = ""
+    try:
+        main = page.locator('[role="main"]')
+        if await main.count() > 0:
+            text = (await main.first.inner_text() or "")[:40000]
+        else:
+            text = (await page.inner_text("body"))[:40000]
+    except Exception:
+        text = ""
+
+    title_full = None
+    try:
+        h1 = page.locator("h1").first
+        if await h1.count():
+            t = ((await h1.inner_text()) or "").strip()
+            if len(t) >= len(raw.title):
+                title_full = t[:500]
+    except Exception:
+        pass
+
+    brand, cond = _brand_condition_from_text(text)
+    desc = _description_blob_from_text(text, raw.title)
+    loc_detail = None
+    m = re.search(r"(?:Location|Listed in)\s*[:\s]+\s*([^\n\r]+)", text, re.I)
+    if m:
+        loc_detail = _strip_noise(m.group(1))[:200]
+
+    imgs = await _collect_image_urls_from_page(page, limit=8)
+    primary_img = imgs[0] if imgs else raw.image_url
+
+    new_desc = (desc or "").strip()
+    old_desc = (raw.description or "").strip()
+    final_desc = new_desc if len(new_desc) > len(old_desc) else old_desc
+
+    return replace(
+        raw,
+        title_full=title_full or raw.title_full,
+        brand=brand or raw.brand,
+        condition=cond or raw.condition,
+        listing_location_detail=loc_detail or raw.listing_location_detail,
+        description=final_desc,
+        image_url=primary_img or raw.image_url,
+        image_urls=list(imgs) if imgs else list(raw.image_urls or []),
+        detail_enriched=True,
+    )
+
+
+async def _maybe_enrich_listings_from_detail_pages(
+    page,
+    items: list[RawListing],
+    *,
+    user_id: int,
+) -> list[RawListing]:
+    max_n = _int_env("WORKER_COLLECTOR_DETAIL_ENRICH_MAX", 25)
+    if max_n <= 0 or not items:
+        return items
+    out: list[RawListing] = []
+    enriched_n = 0
+    for i, raw in enumerate(items):
+        if i >= max_n:
+            out.append(raw)
+            continue
+        try:
+            er = await _enrich_one_raw_listing(page, raw)
+            out.append(er)
+            if er.detail_enriched:
+                enriched_n += 1
+        except Exception as exc:
+            logger.warning(
+                "Detail enrich failed user_id=%s url=%s: %s",
+                user_id,
+                raw.source_link,
+                exc,
+            )
+            out.append(raw)
+    logger.info(
+        "Step 1 detail-page enrich: user_id=%s attempted=%s enriched_ok=%s total=%s",
+        user_id,
+        min(len(items), max_n),
+        enriched_n,
+        len(items),
+    )
+    return out
+
+
 async def _collect_marketplace_feed_for_query(
     page,
     *,
@@ -763,6 +926,11 @@ async def fetch_listings_playwright(
                             if len(merged) >= total_cap:
                                 break
                         out = merged[:total_cap]
+                    out = await _maybe_enrich_listings_from_detail_pages(
+                        page,
+                        out,
+                        user_id=int(collection_inputs.user_id),
+                    )
                     collector_meta = {
                         "degraded_mode": bool(ui_applied.get("degraded_mode")),
                         "worker_collector_warning": ui_applied.get("worker_collector_warning"),

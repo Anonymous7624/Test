@@ -29,11 +29,22 @@ def normalize_raw_to_candidate(
     """Map scraper output to the internal candidate shape for this user/job."""
     source_url = raw.source_link.strip()
     scraped = datetime.utcnow()
+    title_effective = (
+        (getattr(raw, "title_full", None) or "").strip() or (raw.title or "").strip()
+    )
+    listing_scrape = {
+        "brand": getattr(raw, "brand", None),
+        "condition": getattr(raw, "condition", None),
+        "listing_location_detail": getattr(raw, "listing_location_detail", None),
+        "image_urls": list(getattr(raw, "image_urls", None) or [])[:12],
+        "detail_enriched": bool(getattr(raw, "detail_enriched", False)),
+    }
     meta = {
         "collector_category_slug": raw.category_slug,
         "profile_search_mode": str(profile.search_mode or "").strip(),
         "profile_marketplace_category_slug": profile.marketplace_category_slug,
         "listing_location_parsed": getattr(raw, "listing_location_parsed", None),
+        "listing_scrape": listing_scrape,
         "collection": {
             "listing_category_ref": collection_inputs.listing_category_ref,
             "keywords": list(collection_inputs.keywords),
@@ -47,7 +58,7 @@ def normalize_raw_to_candidate(
         user_id=profile.user_id,
         source_url=source_url,
         source_id=_stable_source_id(raw),
-        title=raw.title.strip(),
+        title=title_effective,
         price=float(raw.price),
         description=(raw.description or "").strip(),
         location_text=(raw.location or "").strip(),

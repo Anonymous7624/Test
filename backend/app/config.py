@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     ollama_model: str = Field(default="llama3.2", validation_alias="OLLAMA_MODEL")
     # Step 3 HTTP budget for Ollama /api/chat (httpx). Prefer OLLAMA_TIMEOUT_SECONDS; OLLAMA_TIMEOUT is legacy.
     ollama_timeout: float = Field(
-        default=240.0,
+        default=300.0,
         validation_alias=AliasChoices("OLLAMA_TIMEOUT_SECONDS", "OLLAMA_TIMEOUT"),
     )
     # Added to baseline Ollama HTTP timeout for high-priority (strong / likely-profitable) candidates.

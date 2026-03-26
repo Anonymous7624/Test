@@ -158,6 +158,7 @@ def _failure_result(
     model: str | None,
     error: str,
     conservative_alert: bool,
+    fallback_reason: str = "ollama_request_failed",
 ) -> Step3ScoreResult:
     fb, profitable_hint = _heuristic_fallback(inp)
     fb["should_alert"] = bool(conservative_alert and profitable_hint)
@@ -168,6 +169,8 @@ def _failure_result(
         "model": model,
         "scoring_error": error[:500],
         "used_ollama": False,
+        "scoring_source": "heuristic_fallback",
+        "fallback_reason": fallback_reason,
     }
     return Step3ScoreResult(
         estimated_resale=round(float(fb["estimated_resale"]), 2),
@@ -193,12 +196,18 @@ def score_matched_candidate(
     """
     base = (settings.ollama_base_url or "").strip().rstrip("/")
     model = (settings.ollama_model or "llama3.2").strip()
-    default_timeout = float(settings.ollama_timeout or 240.0)
+    default_timeout = float(settings.ollama_timeout or 300.0)
     timeout = float(timeout_seconds if timeout_seconds is not None else default_timeout)
 
     if not base:
         fb, _ = _heuristic_fallback(inp)
-        ai = {**fb, "model": None, "used_ollama": False}
+        ai = {
+            **fb,
+            "model": None,
+            "used_ollama": False,
+            "scoring_source": "heuristic_fallback",
+            "fallback_reason": "ollama_base_url_not_configured",
+        }
         return Step3ScoreResult(
             estimated_resale=round(float(fb["estimated_resale"]), 2),
             estimated_profit=round(float(fb["estimated_profit"]), 2),
@@ -241,16 +250,25 @@ def score_matched_candidate(
     }
 
     title_hint = _trim(inp.title, 120)
+    # Long read for slow local models; connect stays bounded so dead hosts fail fast.
+    httpx_timeout = httpx.Timeout(
+        connect=min(60.0, max(10.0, timeout * 0.25)),
+        read=timeout,
+        write=min(120.0, timeout),
+        pool=timeout,
+    )
     logger.info(
-        "Ollama request starting url=%s model=%s timeout_seconds=%.1f title=%s",
+        "Ollama request starting url=%s model=%s timeout_seconds=%.1f httpx_read=%.1f connect=%.1f title=%s",
         url,
         model,
         timeout,
+        httpx_timeout.read,
+        httpx_timeout.connect,
         title_hint,
     )
 
     try:
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=httpx_timeout) as client:
             r = client.post(url, json=payload)
             if r.status_code == 400:
                 loose = {**payload, "format": "json"}
@@ -259,9 +277,10 @@ def score_matched_candidate(
             data = r.json()
     except httpx.TimeoutException as exc:
         logger.warning(
-            "Ollama request timed out after %.1fs (configured timeout_seconds=%.1f) url=%s model=%s title=%s: %s",
+            "Ollama request timed out (read/connect budget exhausted) timeout_seconds=%.1f "
+            "httpx_read=%.1f url=%s model=%s title=%s: %s",
             timeout,
-            timeout,
+            float(httpx_timeout.read),
             url,
             model,
             title_hint,
@@ -272,6 +291,7 @@ def score_matched_candidate(
             model=model,
             error=f"timeout_after_{timeout}s:{exc}",
             conservative_alert=False,
+            fallback_reason="ollama_http_timeout",
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -358,6 +378,7 @@ def score_matched_candidate(
         "should_alert": alert,
         "model": model,
         "used_ollama": True,
+        "scoring_source": "ollama",
         "profit_derived_from_resale": True,
     }
     return Step3ScoreResult(

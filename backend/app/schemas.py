@@ -149,6 +149,7 @@ class ListingOut(BaseModel):
     scraped_at: datetime | None = None
     alert_sent_at: datetime | None = None
     alert_last_error: str | None = None
+    scrape_metadata: dict[str, Any] | None = None
 
     model_config = {"from_attributes": True}
 
@@ -186,6 +187,7 @@ class ListingOut(BaseModel):
             scraped_at=getattr(row, "scraped_at", None),
             alert_sent_at=getattr(row, "alert_sent_at", None),
             alert_last_error=getattr(row, "alert_last_error", None),
+            scrape_metadata=getattr(row, "scrape_metadata", None),
         )
 
 

@@ -83,6 +83,7 @@ export type ListingRow = {
   scraped_at?: string | null;
   alert_sent_at?: string | null;
   alert_last_error?: string | null;
+  scrape_metadata?: Record<string, unknown> | null;
 };
 
 export type MarketplaceCategory = { slug: string; label: string };

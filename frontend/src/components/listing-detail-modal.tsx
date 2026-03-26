@@ -29,6 +29,19 @@ export function ListingDetailModal({ listing, onClose }: Props) {
 
   if (!listing) return null;
 
+  const sm = listing.scrape_metadata as
+    | {
+        brand?: string | null;
+        condition?: string | null;
+        listing_location_detail?: string | null;
+        image_urls?: string[];
+        detail_enriched?: boolean;
+      }
+    | null
+    | undefined;
+
+  const detailImages = Array.isArray(sm?.image_urls) ? sm.image_urls : [];
+
   const url = (listing.source_url && listing.source_url.trim()) || listing.source_link;
   const alertLine =
     listing.alert_sent && listing.alert_sent_at
@@ -66,10 +79,28 @@ export function ListingDetailModal({ listing, onClose }: Props) {
             <dd className="mt-1 whitespace-pre-wrap text-zinc-300">{listing.description?.trim() || "—"}</dd>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <dt className="text-xs uppercase text-zinc-500">Location</dt>
+            <dd className="mt-1 text-zinc-300">{listing.location_text || "—"}</dd>
+          </div>
+          {sm?.listing_location_detail ? (
             <div>
-              <dt className="text-xs uppercase text-zinc-500">Location</dt>
-              <dd className="mt-1 text-zinc-300">{listing.location_text || "—"}</dd>
+              <dt className="text-xs uppercase text-zinc-500">Listing location (detail)</dt>
+              <dd className="mt-1 text-zinc-300">{sm.listing_location_detail}</dd>
             </div>
+          ) : null}
+          {sm?.brand ? (
+            <div>
+              <dt className="text-xs uppercase text-zinc-500">Brand</dt>
+              <dd className="mt-1 text-zinc-300">{sm.brand}</dd>
+            </div>
+          ) : null}
+          {sm?.condition ? (
+            <div>
+              <dt className="text-xs uppercase text-zinc-500">Condition</dt>
+              <dd className="mt-1 text-zinc-300">{sm.condition}</dd>
+            </div>
+          ) : null}
             <div>
               <dt className="text-xs uppercase text-zinc-500">Source URL</dt>
               <dd className="mt-1 break-all">
@@ -131,6 +162,31 @@ export function ListingDetailModal({ listing, onClose }: Props) {
             <div>
               <dt className="text-xs uppercase text-zinc-500">Scraped</dt>
               <dd className="mt-1 text-zinc-400">{new Date(listing.scraped_at).toLocaleString()}</dd>
+            </div>
+          ) : null}
+          {sm?.detail_enriched ? (
+            <div>
+              <dt className="text-xs uppercase text-zinc-500">Detail page scraped</dt>
+              <dd className="mt-1 text-zinc-400">yes</dd>
+            </div>
+          ) : null}
+          {detailImages.length > 0 ? (
+            <div>
+              <dt className="text-xs uppercase text-zinc-500">Images</dt>
+              <dd className="mt-2 flex flex-wrap gap-2">
+                {detailImages.slice(0, 6).map((u) => (
+                  <a
+                    key={u}
+                    href={u}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block overflow-hidden rounded border border-zinc-800"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={u} alt="" className="h-24 w-24 object-cover" loading="lazy" />
+                  </a>
+                ))}
+              </dd>
             </div>
           ) : null}
           {listing.ai_result && Object.keys(listing.ai_result).length > 0 ? (

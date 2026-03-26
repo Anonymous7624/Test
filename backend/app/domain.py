@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 
 @dataclass
@@ -98,3 +99,5 @@ class Listing:
     scraped_at: datetime | None = None
     alert_sent_at: datetime | None = None
     alert_last_error: str | None = None
+    # Brand, condition, image URLs, etc. from Step 1 detail scrape (optional).
+    scrape_metadata: dict[str, Any] | None = None
