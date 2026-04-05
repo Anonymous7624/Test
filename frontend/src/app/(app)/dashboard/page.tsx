@@ -92,32 +92,23 @@ export default function DashboardPage() {
               {worker.pipeline_message}
             </p>
           ) : null}
-          {typeof worker?.pipeline_step3_rank === "number" &&
-          typeof worker?.pipeline_step3_total === "number" &&
-          worker.pipeline_step3_total > 0 ? (
-            <p className="mt-2 text-[11px] font-mono text-zinc-400">
-              Step 3 queue: {worker.pipeline_step3_rank}/{worker.pipeline_step3_total}
-            </p>
-          ) : null}
           {cur ? (
             <div className="mt-2">
               <p className="text-[10px] uppercase tracking-wide text-zinc-600">
                 Current batch (in progress)
               </p>
               <p className="mt-1 font-mono text-[11px] text-zinc-500">
-                Raw {cur.raw_collected} · prefilter kept {cur.step1_kept} · matched {cur.step2_matched} · scored{" "}
-                {cur.step3_scored} · saved {cur.step4_saved} · alerts {cur.alerts_sent}
+                Raw {cur.raw_collected} · kept {cur.step1_kept} · matched {cur.step2_matched} · saved {cur.step4_saved} · alerts {cur.alerts_sent}
               </p>
             </div>
           ) : null}
           {pc ? (
             <div className="mt-2">
               <p className="text-[10px] uppercase tracking-wide text-zinc-600">
-                Last completed batch (Steps 1–4)
+                Last completed batch
               </p>
               <p className="mt-1 font-mono text-[11px] text-zinc-500">
-                Raw {pc.raw_collected} · prefilter kept {pc.step1_kept} · matched {pc.step2_matched} · scored{" "}
-                {pc.step3_scored} · saved {pc.step4_saved} · alerts {pc.alerts_sent}
+                Raw {pc.raw_collected} · kept {pc.step1_kept} · matched {pc.step2_matched} · saved {pc.step4_saved} · alerts {pc.alerts_sent}
               </p>
             </div>
           ) : null}
@@ -240,15 +231,14 @@ export default function DashboardPage() {
             All listings →
           </Link>
         </div>
-        <p className="mt-2 text-xs text-zinc-500">Click a row for full description and AI reasoning.</p>
+        <p className="mt-2 text-xs text-zinc-500">Click a row for full description and details.</p>
         <div className="mt-4 overflow-x-auto rounded-xl border border-zinc-800">
           <table className="min-w-full text-left text-sm">
             <thead className="border-b border-zinc-800 bg-zinc-900/80 text-xs uppercase text-zinc-500">
               <tr>
                 <th className="px-3 py-2">Title</th>
                 <th className="px-3 py-2">Price</th>
-                <th className="px-3 py-2">Est. profit</th>
-                <th className="px-3 py-2">Confidence</th>
+                <th className="px-3 py-2">Est. profit (heuristic)</th>
                 <th className="px-3 py-2">Mode</th>
                 <th className="px-3 py-2">Alert</th>
                 <th className="px-3 py-2">Found</th>
@@ -267,13 +257,6 @@ export default function DashboardPage() {
                     ${r.estimated_profit.toFixed(2)}
                   </td>
                   <td className="px-3 py-2 text-zinc-400">
-                    {r.confidence != null
-                      ? typeof r.confidence === "number"
-                        ? `${(r.confidence * 100).toFixed(0)}%`
-                        : String(r.confidence)
-                      : "—"}
-                  </td>
-                  <td className="px-3 py-2 text-zinc-400">
                     {r.origin_type === "backfill" ? "Backfill" : "Live"}
                   </td>
                   <td className="max-w-[12rem] px-3 py-2 text-xs text-zinc-400">
@@ -288,9 +271,8 @@ export default function DashboardPage() {
               ))}
               {listings.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-zinc-500">
-                    No listings yet — enable monitoring in Settings and keep the worker running against MongoDB so matches
-                    can be saved after AI scoring.
+                  <td colSpan={6} className="px-3 py-8 text-center text-zinc-500">
+                    No listings yet — enable monitoring in Settings and keep the worker running. Matches are saved automatically after filtering.
                   </td>
                 </tr>
               )}

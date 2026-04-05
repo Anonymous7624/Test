@@ -300,13 +300,6 @@ export default function SettingsPage() {
               {worker.pipeline_message}
             </p>
           ) : null}
-          {typeof worker?.pipeline_step3_rank === "number" &&
-          typeof worker?.pipeline_step3_total === "number" &&
-          worker.pipeline_step3_total > 0 ? (
-            <p className="mt-2 text-[11px] font-mono text-zinc-400">
-              Step 3 queue: {worker.pipeline_step3_rank}/{worker.pipeline_step3_total}
-            </p>
-          ) : null}
           {worker?.current_pipeline_counts ? (
             <div className="mt-2">
               <p className="text-[10px] uppercase tracking-wide text-zinc-600">
@@ -326,10 +319,6 @@ export default function SettingsPage() {
                   <dd className="inline text-zinc-400">{worker.current_pipeline_counts.step2_matched}</dd>
                 </div>
                 <div>
-                  <dt className="inline text-zinc-600">Scored </dt>
-                  <dd className="inline text-zinc-400">{worker.current_pipeline_counts.step3_scored}</dd>
-                </div>
-                <div>
                   <dt className="inline text-zinc-600">Saved / alerts </dt>
                   <dd className="inline text-zinc-400">
                     {worker.current_pipeline_counts.step4_saved} / {worker.current_pipeline_counts.alerts_sent}
@@ -341,7 +330,7 @@ export default function SettingsPage() {
           {worker?.pipeline_counts ? (
             <div className="mt-2">
               <p className="text-[10px] uppercase tracking-wide text-zinc-600">
-                Last completed batch (Steps 1–4) — not lifetime totals
+                Last completed batch — not lifetime totals
               </p>
               <dl className="mt-1 grid gap-1 font-mono text-[11px] text-zinc-500 sm:grid-cols-2">
                 <div>
@@ -355,10 +344,6 @@ export default function SettingsPage() {
                 <div>
                   <dt className="inline text-zinc-600">Matched </dt>
                   <dd className="inline text-zinc-400">{worker.pipeline_counts.step2_matched}</dd>
-                </div>
-                <div>
-                  <dt className="inline text-zinc-600">Scored </dt>
-                  <dd className="inline text-zinc-400">{worker.pipeline_counts.step3_scored}</dd>
                 </div>
                 <div>
                   <dt className="inline text-zinc-600">Saved / alerts </dt>
@@ -765,7 +750,7 @@ export default function SettingsPage() {
                   }
                 >
                   <option value="any_listing">Every matched listing</option>
-                  <option value="profitable_only">Profitable listings only</option>
+                  <option value="profitable_only">Profitable listings only (heuristic estimate)</option>
                   <option value="none">None (no Telegram alerts)</option>
                 </select>
               </div>

@@ -1,4 +1,7 @@
-"""Pre-AI gate: only higher-signal listings are sent to Ollama (Step 3)."""
+"""
+Quality gate: only listings with sufficient signal (non-spam, relevant, valid price/title)
+pass through to Step 3 (save + alert). AI scoring is not required; this gate runs independently.
+"""
 
 from __future__ import annotations
 
@@ -43,8 +46,9 @@ def pre_ai_should_score(
     matched_keywords: list[str],
 ) -> tuple[bool, float, list[str]]:
     """
-    Returns (send_to_ai, strength 0..1, debug reasons).
-    Stricter than Step 1 — reduces noisy listings reaching the LLM after max-price removal.
+    Quality gate: returns (passes, strength 0..1, debug reasons).
+    Rejects spam, junk phrases, very short titles, and low-signal listings before save/alert.
+    Threshold controlled by WORKER_PRE_AI_MIN_STRENGTH (default 0.42).
     """
     min_strength = _env_float("WORKER_PRE_AI_MIN_STRENGTH", 0.42)
     title = (candidate.title or "").strip()

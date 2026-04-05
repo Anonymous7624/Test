@@ -218,6 +218,7 @@ export type PipelineCountsPayload = {
   raw_collected: number;
   step1_kept: number;
   step2_matched: number;
+  /** Always 0 while AI scoring is disabled; kept for DB field compatibility. */
   step3_scored: number;
   step4_saved: number;
   alerts_sent: number;
@@ -242,7 +243,7 @@ export type WorkerStatusPayload = {
   /** Live counters for the batch currently running (reset when a new batch starts). */
   current_pipeline_counts?: PipelineCountsPayload | null;
   current_pipeline_scope?: string;
-  /** Step 3 queue position while AI scoring (1-based); omitted when idle. */
+  /** Always 0/null while AI scoring is disabled. */
   pipeline_step3_rank?: number | null;
   pipeline_step3_total?: number | null;
   admin_pipeline_snapshot?: Record<string, unknown> | null;

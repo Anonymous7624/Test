@@ -104,18 +104,21 @@ def build_listing_alert_text(
     location_text: str | None,
     description: str | None,
     source_url: str,
-    confidence: str | float | int | None,
 ) -> str:
-    """Deterministic Telegram body — no LLM text."""
+    """Deterministic Telegram alert body. Profit estimates are heuristic (no AI scoring)."""
+    profit_line = (
+        f"Est. profit (heuristic): {_na_money(estimated_profit)}"
+        if estimated_profit is not None
+        else "Est. profit: N/A"
+    )
     lines = [
-        "Listing alert",
+        "New listing match",
         f"Title: {_na_text(title, max_len=500)}",
         f"Price: {_na_money(price)}",
-        f"Est. retail / resale: {_na_money(estimated_resale)}",
-        f"Est. profit (retail − price): {_na_money(estimated_profit)}",
-        f"Listing location: {_na_text(location_text, max_len=240)}",
-        f"Confidence: {_fmt_confidence(confidence)}",
-        f"Description (snippet): {_first_n_words(description, max_words=30)}",
+        profit_line,
+        f"Est. resale (heuristic): {_na_money(estimated_resale)}",
+        f"Location: {_na_text(location_text, max_len=240)}",
+        f"Description: {_first_n_words(description, max_words=30)}",
         f"URL: {(source_url or '').strip() or 'N/A'}",
     ]
     text = "\n".join(lines)
@@ -134,11 +137,11 @@ def send_listing_alert(
     location_text: str | None,
     description: str | None,
     source_url: str,
-    confidence: str | float | int | None,
 ) -> tuple[bool, str | None]:
     """
     Sends a deterministic template alert to the user's Telegram chat.
     Returns (success, error_message_if_failed).
+    Profit/resale values are heuristic estimates (AI scoring is not required).
     """
     token = _bot_token()
     if not token:
@@ -153,7 +156,6 @@ def send_listing_alert(
         location_text=location_text,
         description=description,
         source_url=source_url,
-        confidence=confidence,
     )
     return _send_message(token, str(chat_id).strip(), text)
 

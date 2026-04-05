@@ -8,14 +8,6 @@ type Props = {
   onClose: () => void;
 };
 
-function fmtConfidence(c: ListingRow["confidence"]): string {
-  if (c == null) return "—";
-  if (typeof c === "number") {
-    if (c >= 0 && c <= 1) return `${(c * 100).toFixed(0)}%`;
-    return String(c);
-  }
-  return String(c);
-}
 
 export function ListingDetailModal({ listing, onClose }: Props) {
   useEffect(() => {
@@ -114,34 +106,26 @@ export function ListingDetailModal({ listing, onClose }: Props) {
               <dd className="mt-1 font-mono text-zinc-200">${listing.price.toFixed(2)}</dd>
             </div>
             <div>
-              <dt className="text-xs uppercase text-zinc-500">Est. retail</dt>
+              <dt className="text-xs uppercase text-zinc-500">Est. resale (heuristic)</dt>
               <dd className="mt-1 font-mono text-zinc-200">${listing.estimated_resale.toFixed(2)}</dd>
             </div>
             <div>
-              <dt className="text-xs uppercase text-zinc-500">Est. profit</dt>
+              <dt className="text-xs uppercase text-zinc-500">Est. profit (heuristic)</dt>
               <dd className={`mt-1 font-mono ${listing.profitable ? "text-emerald-400" : "text-zinc-200"}`}>
                 ${listing.estimated_profit.toFixed(2)}
               </dd>
             </div>
             <div>
-              <dt className="text-xs uppercase text-zinc-500">Confidence</dt>
-              <dd className="mt-1 text-zinc-300">{fmtConfidence(listing.confidence)}</dd>
-            </div>
-            <div>
               <dt className="text-xs uppercase text-zinc-500">Alert status</dt>
               <dd className="mt-1 text-zinc-300">{alertLine}</dd>
             </div>
+          </div>
+          {listing.reasoning?.trim() ? (
             <div>
-              <dt className="text-xs uppercase text-zinc-500">AI should_alert</dt>
-              <dd className="mt-1 text-zinc-300">
-                {listing.should_alert == null ? "—" : listing.should_alert ? "yes" : "no"}
-              </dd>
+              <dt className="text-xs uppercase text-zinc-500">Notes / reasoning</dt>
+              <dd className="mt-1 whitespace-pre-wrap text-zinc-300">{listing.reasoning.trim()}</dd>
             </div>
-          </div>
-          <div>
-            <dt className="text-xs uppercase text-zinc-500">AI reasoning</dt>
-            <dd className="mt-1 whitespace-pre-wrap text-zinc-300">{listing.reasoning?.trim() || "—"}</dd>
-          </div>
+          ) : null}
           {(listing.matched_keywords?.length ?? 0) > 0 ? (
             <div>
               <dt className="text-xs uppercase text-zinc-500">Matched keywords</dt>
@@ -191,7 +175,7 @@ export function ListingDetailModal({ listing, onClose }: Props) {
           ) : null}
           {listing.ai_result && Object.keys(listing.ai_result).length > 0 ? (
             <div>
-              <dt className="text-xs uppercase text-zinc-500">AI result (raw)</dt>
+              <dt className="text-xs uppercase text-zinc-500">Scoring data (legacy)</dt>
               <dd className="mt-2">
                 <pre className="max-h-48 overflow-auto rounded-lg border border-zinc-800 bg-zinc-900/80 p-3 text-[11px] leading-relaxed text-zinc-500">
                   {JSON.stringify(listing.ai_result, null, 2)}

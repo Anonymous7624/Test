@@ -5,12 +5,6 @@ import { useAuth } from "@/context/auth-context";
 import { ListingDetailModal } from "@/components/listing-detail-modal";
 import { fetchCategories, fetchListings, type ListingRow, type MarketplaceCategory } from "@/lib/api";
 
-function reasoningPreview(text: string | null | undefined, max = 120): string {
-  const t = (text ?? "").trim();
-  if (!t) return "—";
-  if (t.length <= max) return t;
-  return `${t.slice(0, max)}…`;
-}
 
 export default function ListingsPage() {
   const { token } = useAuth();
@@ -90,13 +84,11 @@ export default function ListingsPage() {
               <th className="px-3 py-2">Description</th>
               <th className="px-3 py-2">Keywords</th>
               <th className="px-3 py-2">Price (USD)</th>
-              <th className="px-3 py-2">Est. resale</th>
-              <th className="px-3 py-2">Est. profit</th>
+              <th className="px-3 py-2">Est. resale (heuristic)</th>
+              <th className="px-3 py-2">Est. profit (heuristic)</th>
               <th className="px-3 py-2">Category</th>
               <th className="px-3 py-2">Location</th>
               <th className="px-3 py-2">Mode</th>
-              <th className="px-3 py-2">Confidence</th>
-              <th className="px-3 py-2">AI reasoning</th>
               <th className="px-3 py-2">Found</th>
               <th className="px-3 py-2">Alert</th>
               <th className="px-3 py-2">Link</th>
@@ -129,16 +121,6 @@ export default function ListingsPage() {
                 <td className="px-3 py-2 text-zinc-400">
                   {r.origin_type === "backfill" ? "Backfill" : "Live"}
                 </td>
-                <td className="px-3 py-2 text-zinc-400">
-                  {r.confidence != null
-                    ? typeof r.confidence === "number"
-                      ? `${(r.confidence * 100).toFixed(0)}%`
-                      : String(r.confidence)
-                    : "—"}
-                </td>
-                <td className="max-w-xs truncate px-3 py-2 text-zinc-400" title={r.reasoning ?? ""}>
-                  {reasoningPreview(r.reasoning)}
-                </td>
                 <td className="whitespace-nowrap px-3 py-2 text-zinc-400">
                   {new Date(r.found_at).toLocaleString()}
                 </td>
@@ -146,7 +128,6 @@ export default function ListingsPage() {
                   {r.alert_sent && r.alert_sent_at
                     ? `Sent ${new Date(r.alert_sent_at).toLocaleString()}`
                     : `${r.alert_status}${r.alert_last_error ? ` — ${r.alert_last_error}` : ""}`}
-                  {r.should_alert != null ? ` · AI ${r.should_alert ? "yes" : "no"}` : ""}
                 </td>
                 <td className="px-3 py-2">
                   <a
@@ -163,11 +144,10 @@ export default function ListingsPage() {
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={14} className="px-3 py-12 text-center text-zinc-500">
+                <td colSpan={12} className="px-3 py-12 text-center text-zinc-500">
                   <p className="text-sm font-medium text-zinc-400">No listings yet</p>
                   <p className="mt-2 max-w-lg text-xs text-zinc-500">
-                    Turn on monitoring in Settings, keep the worker running against MongoDB, and wait for the collector to
-                    pass items through match → AI score → save. Rows here are real data from your account only.
+                    Turn on monitoring in Settings and keep the worker running. Listings that pass the filters are saved here automatically.
                   </p>
                 </td>
               </tr>
