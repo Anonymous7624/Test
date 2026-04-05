@@ -130,6 +130,10 @@ _FACEBOOK_AUTH_STATE = (
 )
 _STUB = Path(__file__).resolve().parent / "static" / "marketplace_stub.html"
 
+# Max raw listings collected per Playwright run unless WORKER_COLLECTOR_BATCH_CAP is set.
+_DEFAULT_WORKER_COLLECTOR_BATCH_CAP_LIVE = 30
+_DEFAULT_WORKER_COLLECTOR_BATCH_CAP_BACKFILL = 30
+
 _ITEM_HREF_RE = re.compile(r"/marketplace/item/(\d+)", re.I)
 _PRICE_RE = re.compile(r"\$\s*([\d,]+(?:\.\d{2})?)")
 
@@ -789,10 +793,20 @@ async def fetch_listings_playwright(
                 )
                 return out, {}
             else:
-                    total_cap = _int_env(
-                        "WORKER_COLLECTOR_BATCH_CAP", 600 if backfill else 400
+                    default_batch = (
+                        _DEFAULT_WORKER_COLLECTOR_BATCH_CAP_BACKFILL
+                        if backfill
+                        else _DEFAULT_WORKER_COLLECTOR_BATCH_CAP_LIVE
                     )
+                    total_cap = _int_env("WORKER_COLLECTOR_BATCH_CAP", default_batch)
                     per_query_cap = _int_env("WORKER_COLLECTOR_PER_QUERY_CAP", 100)
+                    logger.info(
+                        "Step 1 collector batch cap: max_listings=%s per run "
+                        "(WORKER_COLLECTOR_BATCH_CAP env overrides default=%s backfill=%s)",
+                        total_cap,
+                        default_batch,
+                        backfill,
+                    )
                     merged: list[RawListing] = []
                     seen_keys: set[str] = set()
 
@@ -832,16 +846,19 @@ async def fetch_listings_playwright(
                             plan.user_id,
                             fq_label,
                         )
+                        pq = min(per_query_cap, total_cap)
                         batch, scroll_meta = await _collect_marketplace_feed_for_query(
                             page,
                             collection_inputs=collection_inputs,
                             expected_query=f"(browse {fq_label})",
                             submission_meta=None,
-                            per_query_cap=min(per_query_cap, total_cap),
+                            per_query_cap=pq,
                         )
                         logger.info(
-                            "Step 1 category feed scroll_meta=%s",
+                            "Step 1 category feed scroll_meta=%s batch_cap=%s per_query_cap=%s",
                             scroll_meta,
+                            total_cap,
+                            pq,
                         )
                         for r in batch:
                             dk = _raw_dedupe_key(r)
