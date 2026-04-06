@@ -133,6 +133,11 @@ _STUB = Path(__file__).resolve().parent / "static" / "marketplace_stub.html"
 # Max raw listings collected per Playwright run unless WORKER_COLLECTOR_BATCH_CAP is set.
 _DEFAULT_WORKER_COLLECTOR_BATCH_CAP_LIVE = 30
 _DEFAULT_WORKER_COLLECTOR_BATCH_CAP_BACKFILL = 30
+# Tighter default for category-feed live runs: early location screening removes obvious
+# out-of-radius listings before detail-page enrichment, so a smaller initial batch wastes
+# far less work.  Override with WORKER_COLLECTOR_CATEGORY_FEED_BATCH_CAP or the global
+# WORKER_COLLECTOR_BATCH_CAP env var.
+_DEFAULT_WORKER_COLLECTOR_BATCH_CAP_CATEGORY_FEED_LIVE = 15
 
 _ITEM_HREF_RE = re.compile(r"/marketplace/item/(\d+)", re.I)
 _PRICE_RE = re.compile(r"\$\s*([\d,]+(?:\.\d{2})?)")
@@ -299,6 +304,64 @@ def _extract_listing_location_from_card_text(
         return primary, None
 
     return parsed.strip(), parsed.strip()
+
+
+def _early_location_screen(
+    items: list[RawListing],
+    *,
+    collection_inputs: CollectionInputs,
+) -> tuple[list[RawListing], int, int]:
+    """
+    Pre-enrichment location filter using only text visible on the card.
+
+    Only rejects when ``listing_location_parsed`` is set (a real location was parsed from the
+    card text) AND that location clearly fails the same text-based radius check that Step 2 would
+    apply.  Listings with no parsed card location (``listing_location_parsed=None``) are passed
+    through — their ``location`` field is the primary-search fallback, so there is no independent
+    signal to reject on.
+
+    Cards that were clearly outside the radius are skipped from detail-page enrichment entirely,
+    saving one browser page-visit per rejected card.
+
+    Returns ``(passed_items, early_rejected_count, unknown_location_count)``.
+    """
+    # Lazy import: backend/ is added to sys.path by main.py before this is ever called.
+    from app.services.geo_filter import listing_within_user_radius  # noqa: PLC0415
+
+    passed: list[RawListing] = []
+    rejected = 0
+    unknown = 0
+
+    for raw in items:
+        parsed_loc = (raw.listing_location_parsed or "").strip()
+        if not parsed_loc:
+            # Location fell back to the primary-search region — can't distinguish; pass through.
+            unknown += 1
+            passed.append(raw)
+            continue
+
+        within = listing_within_user_radius(
+            user_lat=collection_inputs.center_lat,
+            user_lon=collection_inputs.center_lon,
+            radius_km=collection_inputs.radius_km,
+            boundary_context=collection_inputs.boundary_context,
+            user_location_text=collection_inputs.location_text,
+            listing_lat=None,   # cards never carry lat/lon
+            listing_lon=None,
+            listing_location_text=parsed_loc,
+        )
+        if within:
+            passed.append(raw)
+        else:
+            rejected += 1
+            logger.info(
+                "Step 1 early-loc-reject user_id=%s card_location=%r "
+                "(outside radius — detail-enrich skipped)",
+                collection_inputs.user_id,
+                parsed_loc,
+            )
+
+    return passed, rejected, unknown
 
 
 async def _parse_stub_page(
@@ -556,14 +619,51 @@ async def _maybe_enrich_listings_from_detail_pages(
     page,
     items: list[RawListing],
     *,
-    user_id: int,
-) -> list[RawListing]:
+    collection_inputs: CollectionInputs,
+) -> tuple[list[RawListing], dict]:
+    """
+    Screen by card-visible location, then optionally visit detail pages for richer data.
+
+    Returns ``(result_listings, screen_meta)``.  ``screen_meta`` keys:
+
+    - ``collected_from_page``: items entering this stage
+    - ``rejected_early_by_visible_location``: dropped because card location text is outside radius
+    - ``unknown_location_passed``: no parsed card location → passed without screening
+    - ``allowed_to_detail_enrich``: items that entered detail-page enrichment
+    - ``detail_enriched_ok``: items successfully enriched with detail-page data
+    """
+    user_id = collection_inputs.user_id
     max_n = _int_env("WORKER_COLLECTOR_DETAIL_ENRICH_MAX", 25)
-    if max_n <= 0 or not items:
-        return items
+
+    # ── Card-visible location pre-screen (before any detail-page browser visits) ──────────────
+    screened, early_reject_n, unknown_n = _early_location_screen(
+        items, collection_inputs=collection_inputs
+    )
+    logger.info(
+        "Step 1 card-loc-screen user_id=%s: "
+        "collected_from_page=%s rejected_early_by_visible_location=%s "
+        "unknown_location_passed=%s allowed_to_detail_enrich=%s",
+        user_id,
+        len(items),
+        early_reject_n,
+        unknown_n,
+        len(screened),
+    )
+    screen_meta: dict = {
+        "collected_from_page": len(items),
+        "rejected_early_by_visible_location": early_reject_n,
+        "unknown_location_passed": unknown_n,
+        "allowed_to_detail_enrich": len(screened),
+        "detail_enriched_ok": 0,
+    }
+
+    if max_n <= 0 or not screened:
+        return screened, screen_meta
+
+    # ── Detail-page enrichment for the screened survivors ────────────────────────────────────
     out: list[RawListing] = []
     enriched_n = 0
-    for i, raw in enumerate(items):
+    for i, raw in enumerate(screened):
         if i >= max_n:
             out.append(raw)
             continue
@@ -580,14 +680,16 @@ async def _maybe_enrich_listings_from_detail_pages(
                 exc,
             )
             out.append(raw)
+
+    screen_meta["detail_enriched_ok"] = enriched_n
     logger.info(
-        "Step 1 detail-page enrich: user_id=%s attempted=%s enriched_ok=%s total=%s",
+        "Step 1 detail-page enrich: user_id=%s attempted=%s enriched_ok=%s screened_total=%s",
         user_id,
-        min(len(items), max_n),
+        min(len(screened), max_n),
         enriched_n,
-        len(items),
+        len(screened),
     )
-    return out
+    return out, screen_meta
 
 
 async def _collect_marketplace_feed_for_query(
@@ -798,14 +900,28 @@ async def fetch_listings_playwright(
                         if backfill
                         else _DEFAULT_WORKER_COLLECTOR_BATCH_CAP_LIVE
                     )
-                    total_cap = _int_env("WORKER_COLLECTOR_BATCH_CAP", default_batch)
+                    # Category-feed live runs use a tighter default to reduce radius-reject waste.
+                    # Priority: WORKER_COLLECTOR_BATCH_CAP (global) >
+                    #           WORKER_COLLECTOR_CATEGORY_FEED_BATCH_CAP (feed-only) >
+                    #           mode-specific built-in default.
+                    _global_cap_env = os.environ.get("WORKER_COLLECTOR_BATCH_CAP", "").strip()
+                    if _global_cap_env:
+                        total_cap = _int_env("WORKER_COLLECTOR_BATCH_CAP", default_batch)
+                    elif plan.step1_collection_mode == "category_feed" and not backfill:
+                        total_cap = _int_env(
+                            "WORKER_COLLECTOR_CATEGORY_FEED_BATCH_CAP",
+                            _DEFAULT_WORKER_COLLECTOR_BATCH_CAP_CATEGORY_FEED_LIVE,
+                        )
+                    else:
+                        total_cap = default_batch
                     per_query_cap = _int_env("WORKER_COLLECTOR_PER_QUERY_CAP", 100)
                     logger.info(
                         "Step 1 collector batch cap: max_listings=%s per run "
-                        "(WORKER_COLLECTOR_BATCH_CAP env overrides default=%s backfill=%s)",
+                        "(mode=%s backfill=%s; global_override=%s)",
                         total_cap,
-                        default_batch,
+                        plan.step1_collection_mode,
                         backfill,
+                        bool(_global_cap_env),
                     )
                     merged: list[RawListing] = []
                     seen_keys: set[str] = set()
@@ -943,14 +1059,22 @@ async def fetch_listings_playwright(
                             if len(merged) >= total_cap:
                                 break
                         out = merged[:total_cap]
-                    out = await _maybe_enrich_listings_from_detail_pages(
+                    out, enrich_meta = await _maybe_enrich_listings_from_detail_pages(
                         page,
                         out,
-                        user_id=int(collection_inputs.user_id),
+                        collection_inputs=collection_inputs,
+                    )
+                    logger.info(
+                        "Step 1 enrich+screen summary user_id=%s: %s",
+                        collection_inputs.user_id,
+                        enrich_meta,
                     )
                     collector_meta = {
                         "degraded_mode": bool(ui_applied.get("degraded_mode")),
                         "worker_collector_warning": ui_applied.get("worker_collector_warning"),
+                        # Surface date-listed filter status so callers can distinguish it from
+                        # location_mismatch rejects (which come from Step 2 geo check, not the filter).
+                        "date_listed_24h_selected": ui_applied.get("date_listed_24h_selected"),
                     }
                     logger.info(
                         "Collector success: listings=%s source=%s user_id=%s",

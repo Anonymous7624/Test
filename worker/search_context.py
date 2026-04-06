@@ -29,6 +29,8 @@ class CollectionInputs:
     center_lon: float | None
     radius_km: float
     radius_hint: str
+    # Geoapify boundary context — needed for city-token geo checks (same as profile.boundary_context).
+    boundary_context: dict | None = None
 
 
 def _nearby_and_related_areas(profile: UserSettingsRow) -> list[str]:
@@ -75,6 +77,7 @@ def build_collection_inputs(profile: UserSettingsRow) -> CollectionInputs:
         center_lon=profile.center_lon,
         radius_km=r_km,
         radius_hint=hint,
+        boundary_context=profile.boundary_context if isinstance(profile.boundary_context, dict) else None,
     )
 
 

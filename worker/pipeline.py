@@ -518,4 +518,16 @@ def process_batch(
         bucket_counts.get("other", 0),
         dict(step2_reason_counter),
     )
+    loc_miss = bucket_counts.get("location_mismatch", 0)
+    if loc_miss > 0:
+        logger.info(
+            "Step 2 location note user_id=%s: %s location_mismatch reject(s) are from the "
+            "Step 2 text-based geo check on listing location text — this is NOT caused by the "
+            "Date-listed / 24h UI filter (which is applied at Facebook UI level before collection). "
+            "Card-visible location pre-screening (Step 1) should have reduced these; remaining "
+            "rejects are listings whose location was not parsed from the card or passed card-screen "
+            "but failed the post-enrichment Step 2 check.",
+            profile.user_id,
+            loc_miss,
+        )
     return stats
