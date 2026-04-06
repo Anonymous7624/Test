@@ -1,8 +1,25 @@
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Annotated, Any, Literal
 
-from typing import Any, Literal
+from pydantic import BaseModel, BeforeValidator, Field
 
-from pydantic import BaseModel, Field
+
+def _as_utc(v: object) -> object:
+    """Attach UTC tzinfo to naive datetimes so Pydantic serialises them with +00:00.
+
+    JavaScript's Date constructor treats ISO strings *without* a timezone designator
+    as local time (ECMAScript spec), which produces a display offset equal to the
+    user's UTC offset (e.g. 4 h off for EDT).  Appending +00:00 tells JS the value
+    is UTC and .toLocaleString() then converts it to the correct local time.
+    """
+    if isinstance(v, datetime) and v.tzinfo is None:
+        return v.replace(tzinfo=timezone.utc)
+    return v
+
+
+# Use this instead of plain `datetime` for any timestamp field that originates
+# from the worker/DB (stored as naive UTC) and must display correctly in the UI.
+UTCDatetime = Annotated[datetime, BeforeValidator(_as_utc)]
 
 from app.domain import Listing, UserSettings as UserSettingsRow
 from app.services.marketplace_categories_service import label_for_slug
@@ -52,7 +69,7 @@ class UserSettingsOut(BaseModel):
     telegram_connected: bool
     monitoring_enabled: bool
     monitoring_state: str
-    last_checked_at: datetime | None = None
+    last_checked_at: UTCDatetime | None = None
     last_error: str | None = None
     backfill_complete: bool
     geoapify_place_id: str | None = None
@@ -131,7 +148,7 @@ class ListingOut(BaseModel):
     category_id: str
     category_slug: str
     location_text: str
-    found_at: datetime
+    found_at: UTCDatetime
     alert_status: str
     source_link: str
     source_url: str | None = None
@@ -146,8 +163,8 @@ class ListingOut(BaseModel):
     should_alert: bool | None = None
     description: str | None = None
     matched_keywords: list[str] = Field(default_factory=list)
-    scraped_at: datetime | None = None
-    alert_sent_at: datetime | None = None
+    scraped_at: UTCDatetime | None = None
+    alert_sent_at: UTCDatetime | None = None
     alert_last_error: str | None = None
     scrape_metadata: dict[str, Any] | None = None
 
@@ -206,7 +223,7 @@ class AdminUserOut(BaseModel):
     id: int
     username: str
     role: str
-    created_at: datetime
+    created_at: UTCDatetime
 
     model_config = {"from_attributes": True}
 
@@ -224,7 +241,7 @@ class WorkerStatus(BaseModel):
     monitoring_enabled: bool
     monitoring_state: str
     message: str
-    last_checked_at: datetime | None = None
+    last_checked_at: UTCDatetime | None = None
     listings_found_count: int = 0
     alerts_sent_count: int = 0
     backfill_complete: bool = True
@@ -235,8 +252,8 @@ class WorkerStatus(BaseModel):
     current_step: int = 0
     current_state: str = "idle"
     pipeline_message: str = ""
-    last_batch_started_at: datetime | None = None
-    last_successful_run_at: datetime | None = None
+    last_batch_started_at: UTCDatetime | None = None
+    last_successful_run_at: UTCDatetime | None = None
     pipeline_error: str | None = None
     pipeline_counts: PipelineCountsOut | None = None
     pipeline_counts_scope: str = Field(
@@ -266,7 +283,7 @@ class WorkerStatus(BaseModel):
 
 class TelegramVerificationStart(BaseModel):
     code: str
-    expires_at: datetime
+    expires_at: UTCDatetime
     instructions: str
     bot_username: str
     start_command: str

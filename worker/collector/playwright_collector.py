@@ -202,17 +202,26 @@ def _extract_price(text: str) -> float | None:
 
 
 def _title_from_card_text(text: str) -> str:
-    """First non-trivial line is usually the title on Marketplace cards."""
+    """First non-trivial, non-junk line from a Marketplace card is the listing title."""
     lines = [ln.strip() for ln in text.replace("\t", " ").splitlines() if ln.strip()]
     for ln in lines:
+        # Skip very short tokens
         if len(ln) < 3:
             continue
         # Skip lines that are only a price
         if _extract_price(ln) is not None and len(ln) <= 18:
             continue
-        return ln[:500]
+        # Skip pure notification / UI chrome lines
+        if ln.lower() in _JUNK_STANDALONE_LINES:
+            continue
+        # Clean any junk prefix/suffix from the chosen line
+        cleaned = _clean_card_title(ln)
+        if cleaned and len(cleaned) >= 2:
+            return cleaned[:500]
+    # Fallback: strip price, take first line
     cleaned = _PRICE_RE.sub("", text).strip()
-    return cleaned.split("\n")[0][:500] if cleaned else ""
+    first = cleaned.split("\n")[0][:500] if cleaned else ""
+    return _clean_card_title(first) if first else ""
 
 
 _MI_DIST_ONLY = re.compile(
@@ -525,8 +534,84 @@ async def _harvest_visible_marketplace_cards(
     return strategy_name, out
 
 
+# ── Junk / noise patterns ────────────────────────────────────────────────────
+
+# Lines that are pure notification / UI chrome — never a real listing title.
+_JUNK_STANDALONE_LINES: frozenset[str] = frozenset(
+    {
+        "unread",
+        "mark as read",
+        "today's picks",
+        "today\u2019s picks",
+        "sponsored",
+        "see more",
+        "send seller a message",
+        "chat with seller",
+        "message seller",
+        "save",
+        "share",
+        "report",
+        "new",
+        "sold",
+        "pending",
+    }
+)
+
+# Prefixes that Facebook prepends to card text for notification/unread badges.
+_JUNK_PREFIX_RE = re.compile(
+    r"^(?:Unread\s*|New\s+message\s*|Mark\s+as\s+read\s*)+",
+    re.I,
+)
+
+# Trailing noise appended after a real title: "·1d", ".1dMark as read", etc.
+_JUNK_SUFFIX_RE = re.compile(
+    r"(?:\s*[\u00b7·]\s*\d+[hdwm]|\s*\.\s*\d+[hdwm]|\s*\d+[hdwm])?(?:\s*Mark\s+as\s+read)?$",
+    re.I,
+)
+
+# Section headings that mark the start of junk content on a detail page.
+# Everything after these headings is recommendation / sponsored / UI chrome.
+_JUNK_SECTION_HEADING_RE = re.compile(
+    r"(?:^|\n)[ \t]*(?:"
+    r"Today[''`\u2019]?s picks"
+    r"|Related listings?"
+    r"|People also (?:viewed|liked)"
+    r"|You may also like"
+    r"|More from (?:this seller|Marketplace)"
+    r"|Similar (?:items?|listings?)"
+    r"|Marketplace listings?"
+    r"|Other items? you may like"
+    r"|Sponsored"
+    r"|Recommended for you"
+    r"|See more (?:from|on) Marketplace"
+    r"|Send (?:seller )?a message"
+    r"|Chat with (?:the )?seller"
+    r"|Message (?:the )?seller"
+    r")[ \t]*(?:\n|$)",
+    re.I,
+)
+
+
 def _strip_noise(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def _clean_card_title(raw_title: str) -> str:
+    """Strip notification prefixes/suffixes injected by Facebook into card text."""
+    t = raw_title.strip()
+    # Remove leading "Unread", "New message", etc.
+    t = _JUNK_PREFIX_RE.sub("", t).strip()
+    # Remove trailing time-ago + "Mark as read" fragments.
+    t = _JUNK_SUFFIX_RE.sub("", t).strip()
+    return t
+
+
+def _truncate_before_junk_sections(text: str) -> str:
+    """Cut text at the first recommended/sponsored/UI-chrome section heading."""
+    m = _JUNK_SECTION_HEADING_RE.search(text)
+    if m:
+        return text[: m.start()].strip()
+    return text
 
 
 def _brand_condition_from_text(text: str) -> tuple[str | None, str | None]:
@@ -554,15 +639,22 @@ def _brand_condition_from_text(text: str) -> tuple[str | None, str | None]:
 
 
 def _description_blob_from_text(text: str, title: str) -> str:
-    t = (text or "").strip()
+    # Truncate at the first recommended / sponsored / UI-chrome section so we
+    # never include "Today's picks", related listings, or seller contact UI.
+    t = _truncate_before_junk_sections((text or "").strip())
+
+    # Strategy 1: look for an explicit "Description" / "About this item" heading.
     for m in re.finditer(
-        r"(?:Description|About this item|Details)\s*\n+([\s\S]{40,12000}?)(?=\n\s*\n(?:Seller|Location|Condition|Brand|Message)|$)",
+        r"(?:Description|About this item|Details)\s*\n+([\s\S]{40,12000}?)"
+        r"(?=\n\s*\n(?:Seller|Location|Condition|Brand|Message|Listed in|Shipping|More details)|$)",
         t,
         re.I,
     ):
         blob = m.group(1).strip()
         if len(blob) >= 40:
-            return blob[:8000]
+            return _clean_description_blob(blob)[:8000]
+
+    # Strategy 2: longest paragraph that is not the title and not all-junk.
     paras = [p.strip() for p in re.split(r"\n{2,}", t) if len(p.strip()) > 60]
     best = ""
     for p in paras:
@@ -570,7 +662,28 @@ def _description_blob_from_text(text: str, title: str) -> str:
             continue
         if len(p) > len(best):
             best = p
-    return best[:8000] if best else ""
+    return _clean_description_blob(best)[:8000] if best else ""
+
+
+def _clean_description_blob(text: str) -> str:
+    """Remove duplicate lines and obvious junk from a description candidate."""
+    lines = text.splitlines()
+    seen: set[str] = set()
+    out: list[str] = []
+    for ln in lines:
+        norm = ln.strip()
+        # Drop pure junk lines (notification chrome, single-word UI labels)
+        if norm.lower() in _JUNK_STANDALONE_LINES:
+            continue
+        # Drop duplicate lines
+        key = norm.lower()
+        if key and key in seen:
+            continue
+        seen.add(key)
+        out.append(ln)
+    # Collapse runs of more than two blank lines
+    result = re.sub(r"\n{3,}", "\n\n", "\n".join(out))
+    return result.strip()
 
 
 async def _collect_image_urls_from_page(page, limit: int = 8) -> list[str]:
@@ -602,26 +715,74 @@ async def _enrich_one_raw_listing(page, raw: RawListing) -> RawListing:
     except Exception:
         return raw
 
+    # ── Locate the listing detail root ───────────────────────────────────────
+    # Try progressively broader selectors; log which one was used.
+    # We prefer a tight container so recommendation / sponsored sections are
+    # not included in the text we feed to the title/description extractors.
     text = ""
-    try:
-        main = page.locator('[role="main"]')
-        if await main.count() > 0:
-            text = (await main.first.inner_text() or "")[:40000]
-        else:
-            text = (await page.inner_text("body"))[:40000]
-    except Exception:
-        text = ""
+    container_label = "none"
+    _DETAIL_SELECTORS = [
+        # Facebook Marketplace item detail pagelet (most specific)
+        '[data-pagelet="MarketplaceItemMainContent"]',
+        # Generic "article" inside main (common FB layout)
+        '[role="main"] article',
+        # Fallback to the full main region
+        '[role="main"]',
+    ]
+    for sel in _DETAIL_SELECTORS:
+        try:
+            el = page.locator(sel).first
+            if await el.count():
+                raw_text = (await el.inner_text() or "").strip()
+                if len(raw_text) >= 30:
+                    text = raw_text[:40000]
+                    container_label = sel
+                    break
+        except Exception:
+            continue
 
+    if not text:
+        try:
+            text = (await page.inner_text("body"))[:40000]
+            container_label = "body"
+        except Exception:
+            text = ""
+
+    logger.debug(
+        "Detail enrich: url=%s container_root=%r text_len=%s",
+        url,
+        container_label,
+        len(text),
+    )
+
+    # Strip junk sections (recommended items, sponsored content, etc.) from the
+    # raw text before handing it to any extractor.
+    text = _truncate_before_junk_sections(text)
+
+    # ── Title from h1 ────────────────────────────────────────────────────────
+    # Find h1 preferably inside the same container we chose for text.
     title_full = None
     try:
-        h1 = page.locator("h1").first
-        if await h1.count():
-            t = ((await h1.inner_text()) or "").strip()
-            if len(t) >= len(raw.title):
+        # Try h1 inside the chosen container first, then fall back to first h1.
+        h1_locator = (
+            page.locator(f"{container_label} h1").first
+            if container_label not in ("body", "none")
+            else page.locator("h1").first
+        )
+        if not await h1_locator.count():
+            h1_locator = page.locator("h1").first
+
+        if await h1_locator.count():
+            t = ((await h1_locator.inner_text()) or "").strip()
+            # Clean notification noise from the h1 text.
+            t = _clean_card_title(t)
+            # Accept if it looks like a genuine title (not a junk phrase, long enough).
+            if t and t.lower() not in _JUNK_STANDALONE_LINES and len(t) >= 2:
                 title_full = t[:500]
     except Exception:
         pass
 
+    # ── Description, brand, condition, location ───────────────────────────────
     brand, cond = _brand_condition_from_text(text)
     desc = _description_blob_from_text(text, raw.title)
     loc_detail = None

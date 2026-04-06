@@ -172,10 +172,18 @@ def _begin_listing_collection(
     # New attempt — do not show the previous tick's fatal error while this cycle runs.
     s.last_error = None
     repo.replace_settings(s)
+    search_mode = getattr(s, "search_mode", "?")
+    category = getattr(s, "marketplace_category_slug", None) or getattr(s, "marketplace_category_label", None)
+    keywords = getattr(s, "custom_keywords", None) or []
     logger.info(
-        "Batch started: user_id=%s backfill=%s stage=collect_listings",
+        "Batch started: user_id=%s backfill=%s stage=collect_listings "
+        "search_mode=%s category=%r keywords=%r mock_collector=%s",
         s.user_id,
         backfill,
+        search_mode,
+        category,
+        list(keywords)[:5],
+        _mock_collector_enabled(),
     )
 
 
@@ -420,8 +428,23 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
 async def tick() -> None:
     db: Database = get_database()
     try:
-        for doc in db["user_settings"].find({"monitoring_enabled": True}):
+        docs = list(db["user_settings"].find({"monitoring_enabled": True}))
+        if not docs:
+            logger.info(
+                "Worker tick: no users with monitoring_enabled=True — "
+                "nothing to do. Enable monitoring in Settings to start collecting."
+            )
+            return
+        logger.info("Worker tick: processing %s user(s) with monitoring enabled", len(docs))
+        for doc in docs:
             s = settings_from_doc(doc)
+            logger.info(
+                "Worker tick: user_id=%s monitoring_state=%s backfill_complete=%s search_mode=%s",
+                s.user_id,
+                s.monitoring_state,
+                getattr(s, "backfill_complete", True),
+                getattr(s, "search_mode", "?"),
+            )
             try:
                 await _process_monitoring_user(db, s)
             except Exception as exc:  # noqa: BLE001 — surface errors in MVP worker
@@ -442,13 +465,45 @@ async def main_loop() -> None:
     )
     logging.getLogger("collector.playwright_collector").setLevel(logging.INFO)
 
-    ensure_indexes(get_database())
+    db = get_database()
+    ensure_indexes(db)
     interval = float(os.environ.get("WORKER_POLL_SECONDS", "150"))
-    print(
-        f"Worker started. MONGODB_URI={settings.mongodb_uri} db={settings.mongodb_database} "
-        f"poll={interval}s (default 150 = 2.5 min) mock_collector={_mock_collector_enabled()}",
-        flush=True,
-    )
+    mock_mode = _mock_collector_enabled()
+
+    print("=" * 60, flush=True)
+    print("Worker starting up", flush=True)
+    print(f"  MongoDB   : {settings.mongodb_uri!r} / db={settings.mongodb_database!r}", flush=True)
+    print(f"  Poll interval : {interval}s", flush=True)
+    print(f"  Mock collector: {mock_mode} (set WORKER_MOCK_COLLECTOR=1 to enable)", flush=True)
+    if not mock_mode:
+        try:
+            from collector.playwright_collector import facebook_auth_state_path  # noqa: PLC0415
+            auth_path = facebook_auth_state_path()
+            auth_ok = auth_path.is_file()
+            print(f"  Facebook auth : {'OK' if auth_ok else 'MISSING'} ({auth_path})", flush=True)
+            if not auth_ok:
+                print(
+                    "  WARNING: Facebook auth file not found. "
+                    "Run `python facebook_login_bootstrap.py` once to create it.",
+                    flush=True,
+                )
+        except Exception as _e:
+            print(f"  Facebook auth : (could not check — {_e})", flush=True)
+    # Show how many users currently have monitoring enabled
+    try:
+        enabled_count = db["user_settings"].count_documents({"monitoring_enabled": True})
+        print(f"  Users with monitoring_enabled=True: {enabled_count}", flush=True)
+        if enabled_count == 0:
+            print(
+                "  NOTE: No users have monitoring enabled yet. "
+                "Enable monitoring in the Settings page to start collecting.",
+                flush=True,
+            )
+    except Exception as _e:
+        print(f"  (Could not query user_settings: {_e})", flush=True)
+    print(f"  First tick will run immediately, then every {interval}s", flush=True)
+    print("=" * 60, flush=True)
+
     while True:
         try:
             await tick()

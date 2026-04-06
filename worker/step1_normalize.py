@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime
 
 from app.domain import UserSettings as UserSettingsRow
@@ -10,6 +11,23 @@ from app.domain import UserSettings as UserSettingsRow
 from candidate_models import CandidateListing
 from mock_scraper import RawListing
 from search_context import CollectionInputs
+
+# ── Junk / sanity patterns ────────────────────────────────────────────────────
+# These indicate the scraper captured notification chrome or page noise instead
+# of real listing content.  Listings matching these patterns are rejected before
+# they reach the DB.
+
+_JUNK_TITLE_WORDS_RE = re.compile(
+    r"\b(?:Unread|Mark\s+as\s+read|Today[''`\u2019]?s\s+picks|Sponsored)\b",
+    re.I,
+)
+
+_JUNK_DESC_SECTIONS_RE = re.compile(
+    r"(?:Today[''`\u2019]?s\s+picks|Related\s+listings?|People\s+also\s+(?:viewed|liked)"
+    r"|You\s+may\s+also\s+like|More\s+from\s+(?:this\s+seller|Marketplace)"
+    r"|Similar\s+(?:items?|listings?)|Sponsored|Recommended\s+for\s+you)",
+    re.I,
+)
 
 
 def _stable_source_id(raw: RawListing) -> str | None:
@@ -78,12 +96,23 @@ def prefilter_candidate(candidate: CandidateListing) -> tuple[bool, str | None]:
     """
     Light drops before Step 2: invalid rows, missing critical fields, non-numeric/non-positive price.
 
+    Also rejects listings whose title or description contains obvious scraper-noise
+    patterns (notification chrome, recommendation sections, etc.) that indicate the
+    extractor captured page junk rather than real listing content.
+
     Step 2 applies search-mode relevance and a pre-AI strength gate (no max-price filter).
     """
     if not candidate.source_url.strip():
         return False, "missing_source_url"
-    if not candidate.title.strip():
+
+    title = candidate.title.strip()
+    if not title:
         return False, "missing_title"
+
+    # Reject if the title contains obvious page-noise markers.
+    if _JUNK_TITLE_WORDS_RE.search(title):
+        return False, f"junk_title:{title[:80]!r}"
+
     loc = candidate.location_text.strip()
     if not loc:
         return False, "missing_location"
@@ -93,5 +122,14 @@ def prefilter_candidate(candidate: CandidateListing) -> tuple[bool, str | None]:
         return False, "invalid_price"
     if p <= 0:
         return False, "non_positive_price"
+
+    # Warn (but do not reject) if the description contains recommendation section text.
+    # The collector should have already stripped it; this is a last-resort check.
+    desc = candidate.description or ""
+    if desc and _JUNK_DESC_SECTIONS_RE.search(desc):
+        # Strip everything from the junk section onwards rather than discarding.
+        m = _JUNK_DESC_SECTIONS_RE.search(desc)
+        if m:
+            candidate.description = desc[: m.start()].strip() or None  # type: ignore[assignment]
 
     return True, None
