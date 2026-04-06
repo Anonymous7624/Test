@@ -10,6 +10,7 @@ user-configurable price cap is applied in Marketplace UI.
 
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 import time
@@ -35,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 class MarketplaceFilterError(RuntimeError):
     """Raised when a required Marketplace step could not be completed (e.g. location or search box)."""
+
+    def __init__(self, message: str, *, detail: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.detail = detail or {}
 
 
 # US Marketplace radius options commonly seen in the location dialog (miles).
@@ -95,6 +100,13 @@ def _evaluate_category_entry_signals(
         signals["canonical_category_path"] = True
         return True, "canonical_category_path_in_url", signals
 
+    if slug and re.search(
+        rf"/marketplace/[^/]+/category/{re.escape(slug)}(?:/|[?#]|$)",
+        u,
+    ):
+        signals["regional_category_path"] = True
+        return True, "regional_marketplace_category_path", signals
+
     qd = _url_query_dict(url)
     if qd.get("category_id", "").strip():
         signals["category_id"] = qd["category_id"].strip()
@@ -122,6 +134,11 @@ def _evaluate_category_entry_signals(
     u_path = urlparse(url or "").path.lower()
     if slug and slug in u_path and "/marketplace" in u:
         return True, "url_path_contains_category_slug_segment", signals
+
+    slug_us = slug.replace("-", "_") if slug else ""
+    if slug_us and slug_us in u.replace("-", "_") and "/marketplace" in u:
+        signals["slug_underscore_variant_in_url"] = True
+        return True, "url_contains_slug_underscore_variant", signals
 
     t = (page_title or "").lower()
     signals["page_title_sample"] = (page_title or "")[:200]
@@ -1531,13 +1548,104 @@ async def run_focused_marketplace_query(page, query: str) -> dict[str, Any]:
     return meta
 
 
+def _fuzzy_label_text_match(text: str, label: str) -> bool:
+    """Safe fuzzy match for category labels inside longer page text (not for short ambiguous tokens)."""
+    if not label or not text:
+        return False
+    lab = _normalize_compare_token(label)
+    if len(lab) < 4:
+        return False
+    collapsed = re.sub(r"[\s|]+", " ", (text or "").strip().lower())
+    if lab in collapsed:
+        return True
+    tokens = re.findall(r"[a-z]{3,}", collapsed)
+    if not tokens:
+        return False
+    compact = lab.replace(" ", "")
+    if len(compact) >= 5 and difflib.get_close_matches(compact, tokens, n=1, cutoff=0.86):
+        return True
+    for word in lab.split():
+        if len(word) >= 5 and difflib.get_close_matches(word, tokens, n=1, cutoff=0.86):
+            return True
+    return False
+
+
+async def _probe_category_entry_dom_signals(page, plan: SearchPlan) -> tuple[bool, str, dict[str, Any]]:
+    """
+    When the URL/title heuristics miss (SPA paths, redirects), infer category from visible chrome:
+    headings, filter chips, or main landmark text.
+    """
+    slug = (plan.marketplace_category_slug or "").strip()
+    label = (plan.marketplace_category_label or "").strip()
+    sigs: dict[str, Any] = {}
+    if not label and not slug:
+        return False, "no_label_or_slug_for_dom_probe", sigs
+
+    pat_label = re.compile(re.escape(label.strip()), re.I) if label else None
+    pat_slug_words = None
+    if slug:
+        sw = slug.replace("-", " ").strip()
+        if len(sw) >= 3:
+            pat_slug_words = re.compile(re.escape(sw), re.I)
+
+    # Role-based headings (common on category/browse surfaces).
+    for kind, loc in (
+        ("heading", page.get_by_role("heading", name=pat_label) if pat_label else None),
+        (
+            "navigation",
+            page.get_by_role("navigation", name=pat_label) if pat_label else None,
+        ),
+    ):
+        if loc is None:
+            continue
+        try:
+            if await loc.count() < 1:
+                continue
+            el = loc.first
+            try:
+                vis = await el.is_visible()
+            except Exception:
+                vis = False
+            if vis:
+                sigs["dom_match_kind"] = kind
+                try:
+                    sigs["dom_match_text"] = (await el.inner_text() or "")[:120]
+                except Exception:
+                    pass
+                return True, f"dom_{kind}_matches_category_label", sigs
+        except Exception:
+            continue
+
+    # Main landmark: category name often appears in the first screen of text.
+    for sel in ('[role="main"]', "main"):
+        root = page.locator(sel).first
+        try:
+            if await root.count() < 1:
+                continue
+            blob = (await root.inner_text() or "")[:12_000]
+        except Exception:
+            continue
+        sigs["main_inner_text_sample"] = (blob or "")[:220]
+        if label and _visible_text_matches_category_label(blob, label):
+            sigs["dom_match_kind"] = "main_inner_text"
+            return True, "dom_main_text_contains_category_label", sigs
+        if label and _fuzzy_label_text_match(blob, label):
+            sigs["dom_match_kind"] = "main_inner_text_fuzzy"
+            return True, "dom_main_text_fuzzy_matches_category_label", sigs
+        if pat_slug_words and pat_slug_words.search(blob):
+            sigs["dom_match_kind"] = "main_inner_text_slug_words"
+            return True, "dom_main_text_contains_slug_words", sigs
+
+    return False, "dom_probe_no_category_signal", sigs
+
+
 async def _finalize_category_entry_validation(
     page,
     plan: SearchPlan,
     *,
     url_after: str,
 ) -> tuple[bool, str, dict[str, Any]]:
-    """Combine URL/title heuristics; optional feed probe is diagnostic only (no broad accept-all)."""
+    """Combine URL/title heuristics, then visible page state when URLs are ambiguous."""
     title = ""
     try:
         title = await page.title()
@@ -1546,8 +1654,12 @@ async def _finalize_category_entry_validation(
     ok, reason, sigs = _evaluate_category_entry_signals(plan, url_after, title)
     if ok:
         return ok, reason, sigs
-    probe_name, probe_count = await wait_for_any_item_link(page, timeout_ms=10_000)
+    dom_ok, dom_reason, dom_sigs = await _probe_category_entry_dom_signals(page, plan)
     sigs = dict(sigs)
+    sigs["dom_probe"] = dom_sigs
+    if dom_ok:
+        return True, dom_reason, sigs
+    probe_name, probe_count = await wait_for_any_item_link(page, timeout_ms=10_000)
     sigs["feed_probe_after_failed_signals"] = {"selector": probe_name, "count": probe_count}
     return False, reason, sigs
 
@@ -1564,7 +1676,11 @@ def _abs_facebook_href(href: str) -> str:
 
 
 def _normalize_tile_visible_text(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").strip()).split("\n")[0].strip()
+    """Collapse whitespace; keep full first screen of text (category tiles are often multi-line)."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    return re.sub(r"\s+", " ", raw)[:500].strip()
 
 
 def _normalize_compare_token(s: str) -> str:
@@ -1582,7 +1698,6 @@ def _visible_text_matches_category_label(text: str, label: str) -> bool:
     if not t and not raw:
         return False
     lab = _normalize_compare_token(label)
-    # Use full raw (aria may join inner text) when short normalized line drops detail
     tl = _normalize_compare_token(t if len(t) >= 3 else raw)
     if not tl or not lab:
         return False
@@ -1601,6 +1716,10 @@ def _visible_text_matches_category_label(text: str, label: str) -> bool:
     parts = [p for p in lab.split() if len(p) >= 3]
     if len(parts) >= 2 and all(p in tl for p in parts):
         return True
+    if len(lab) >= 5:
+        ratio = difflib.SequenceMatcher(None, tl[: min(len(tl), 80)], lab).ratio()
+        if ratio >= 0.88:
+            return True
     return False
 
 
@@ -1640,9 +1759,99 @@ def _href_has_canonical_category_path(abs_h: str, slug: str) -> bool:
     return f"/marketplace/category/{s}" in u
 
 
+def _href_has_slug_in_any_category_path(abs_h: str, slug: str) -> bool:
+    """
+    True when the URL encodes the slug in any recognisable category path — canonical
+    ``/marketplace/category/{slug}``, regional ``/marketplace/{city}/category/{slug}``,
+    or direct ``/marketplace/{slug}`` short paths.
+
+    Broader than ``_href_has_canonical_category_path`` which only matches the
+    canonical prefix; this covers Facebook's regional URL variants that now appear
+    as category-tile hrefs on Marketplace home.
+    """
+    s = (slug or "").strip().lower()
+    if not s or not abs_h:
+        return False
+    u = abs_h.lower()
+    if f"/marketplace/category/{s}" in u:
+        return True
+    if re.search(rf"/marketplace/[^/?#]+/category/{re.escape(s)}(?:/|[?#]|$)", u):
+        return True
+    # Direct /marketplace/{slug} short path used by some FB regions
+    path_segs = [p for p in urlparse(abs_h).path.lower().split("/") if p]
+    if "marketplace" in path_segs:
+        mi = path_segs.index("marketplace")
+        if mi + 1 < len(path_segs) and path_segs[mi + 1] == s:
+            return True
+    return False
+
+
+# href_plausible_reason values that embed the slug directly in the URL path — strong
+# enough to accept a tile even when the accessible label text cannot be extracted.
+_SLUG_STRONG_HREF_REASONS: frozenset[str] = frozenset({
+    "canonical_category_slug_in_href",
+    "category_path_contains_slug",
+    "marketplace_path_category_slug_segment",
+    "regional_category_slug_in_href",
+    "soft_slug_path_segment",
+})
+
+
 async def _link_accessible_label_text(loc) -> str:
-    """Prefer aria-label/title (icon tiles); fall back to inner_text."""
+    """
+    Visible / accessible name for a category tile: aria, title, subtree textContent, image alts.
+
+    Facebook often nests the label under the clickable anchor or uses icon-only tiles where
+    the visible category name sits in a *sibling* element outside the ``<a>``.  When the
+    anchor itself has no readable text we walk up to the parent and grandparent elements and
+    collect any short sibling text — this is the common React card layout where the icon link
+    and the label span are siblings inside a shared wrapper div.
+    """
+    blob = ""
+    try:
+        blob = await loc.evaluate(
+            """el => {
+              const out = [];
+              const al = el.getAttribute('aria-label');
+              const ti = el.getAttribute('title');
+              if (al && al.trim()) out.push(al.trim());
+              if (ti && ti.trim()) out.push(ti.trim());
+              const tc = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+              if (tc) out.push(tc);
+              for (const img of el.querySelectorAll('img[alt]')) {
+                const a = (img.getAttribute('alt') || '').trim();
+                if (a) out.push(a);
+              }
+              // When the anchor itself has no readable text (icon-only tile), look for a
+              // sibling label span/div in the parent or grandparent wrapper element.
+              if (!tc) {
+                for (let depth = 0; depth < 3; depth++) {
+                  const container = depth === 0 ? el.parentElement
+                                  : depth === 1 ? (el.parentElement && el.parentElement.parentElement)
+                                  : (el.parentElement && el.parentElement.parentElement &&
+                                     el.parentElement.parentElement.parentElement);
+                  if (!container) break;
+                  for (const child of container.children) {
+                    if (child !== el && !child.contains(el)) {
+                      const ct = (child.textContent || '').replace(/\\s+/g, ' ').trim();
+                      // Only accept short strings — category names are short; avoid grabbing
+                      // entire product descriptions or navigation blobs.
+                      if (ct && ct.length <= 64) out.push(ct);
+                    }
+                  }
+                  // Stop as soon as we found something useful
+                  if (out.some(s => s.length > 0)) break;
+                }
+              }
+              return out.join(' | ');
+            }"""
+        )
+    except Exception:
+        blob = ""
+    blob = (blob or "").strip()
     parts: list[str] = []
+    if blob:
+        parts.append(blob)
     for attr in ("aria-label", "title"):
         try:
             v = await loc.get_attribute(attr)
@@ -1659,9 +1868,54 @@ async def _link_accessible_label_text(loc) -> str:
     if not parts:
         return ""
     merged = " ".join(parts)
-    return _normalize_tile_visible_text(merged) or _normalize_tile_visible_text(
-        re.sub(r"\s+", " ", merged)
-    )
+    return _normalize_tile_visible_text(merged)
+
+
+def _fuzzy_visible_category_tile_label(vtext: str, label: str) -> bool:
+    """Fuzzy match on short tile strings (OCR-like typos, truncation)."""
+    if not label or not (vtext or "").strip():
+        return False
+    if _visible_text_matches_category_label(vtext, label):
+        return True
+    a = _normalize_compare_token(vtext)
+    b = _normalize_compare_token(label)
+    if len(b) < 4 or len(a) < 4:
+        return False
+    if difflib.SequenceMatcher(None, a, b).ratio() >= 0.88:
+        return True
+    return False
+
+
+def _href_soft_plausible_category_tile(abs_h: str, slug: str) -> tuple[bool, str]:
+    """
+    Looser browse-shape check used only when visible tile text already matches the category label.
+    Avoids depending on a single canonical URL shape for Marketplace home tiles.
+    """
+    u = (abs_h or "").lower()
+    if not u:
+        return False, "soft_empty_href"
+    if "facebook.com" not in u and "fb.com" not in u:
+        return False, "soft_not_facebook"
+    if "/marketplace" not in u:
+        return False, "soft_not_marketplace"
+    if "/marketplace/item/" in u:
+        return False, "soft_item_detail"
+    if "/marketplace/you" in u or "/notifications" in u:
+        return False, "soft_non_browse"
+    if "/groups/" in u and "marketplace" in u:
+        return False, "soft_groups_marketplace"
+    if "/marketplace/category/" in u or "category_id=" in u:
+        return True, "soft_category_path_or_id"
+    if re.search(r"/marketplace/[a-z0-9_-]{2,24}/search", u):
+        return True, "soft_regional_marketplace_search"
+    if "/marketplace/search" in u or ("/search" in urlparse(u).path and "/marketplace" in u):
+        return True, "soft_marketplace_search_path"
+    slug_l = (slug or "").strip().lower()
+    if slug_l:
+        segs = [p.lower() for p in urlparse(u).path.split("/") if p]
+        if slug_l in segs or slug_l.replace("-", "_") in segs:
+            return True, "soft_slug_path_segment"
+    return False, "soft_no_browse_shape"
 
 
 def _query_param_matches_category(query_raw: str, slug: str, label: str) -> bool:
@@ -1736,6 +1990,9 @@ def _href_plausible_category_home_tile(href_raw: str, slug: str, label: str) -> 
             if ci + 1 < len(path_segs) and path_segs[ci + 1] == slug_l:
                 return True, "marketplace_path_category_slug_segment"
 
+    if slug_l and re.search(rf"/marketplace/[^/]+/category/{re.escape(slug_l)}(?:/|[?#]|$)", u):
+        return True, "regional_category_slug_in_href"
+
     return False, "href_not_recognized_as_category_browse_tile"
 
 
@@ -1744,6 +2001,7 @@ def _category_tile_href_score(href_plausible_reason: str) -> int:
         "canonical_category_slug_in_href",
         "category_path_contains_slug",
         "marketplace_path_category_slug_segment",
+        "regional_category_slug_in_href",
         "category_id_query_param",
         "marketplace_search_with_category_id",
         "marketplace_search_path_with_category_id",
@@ -1757,7 +2015,41 @@ def _category_tile_href_score(href_plausible_reason: str) -> int:
 
 
 async def _marketplace_home_category_primary_scope(page) -> tuple[Any, str]:
-    """Prefer main content; category tiles sometimes render outside ``<main>`` — body fallback next."""
+    """
+    Prefer the Marketplace category-tiles grid/nav section; fall back to main landmark then body.
+
+    Facebook renders category tiles in a labelled navigation region or grid on Marketplace home.
+    Targeting that container first narrows the scan and avoids confusing the category rail with
+    the item listing feed further down the page.  We require at least 3 marketplace links in the
+    container before accepting it — a lone "See all categories" link is not the grid itself.
+    """
+    # Attempt 1 — containers whose aria-label mentions "categor" (e.g. "Categories" or "Browse categories")
+    for sel, tag in (
+        ('[aria-label*="ategori"]', '[aria-label*="ategori"]'),
+        ('[aria-label*="ategor"]', '[aria-label*="ategor"]'),
+    ):
+        try:
+            for loc in [page.locator(sel).nth(i) for i in range(min(3, await page.locator(sel).count()))]:
+                mp_c = await loc.locator('a[href*="/marketplace"]').count()
+                if mp_c >= 3:
+                    return loc, tag
+        except Exception:
+            pass
+
+    # Attempt 2 — role=navigation with a non-empty aria-label that has marketplace links
+    try:
+        navs = page.locator('[role="navigation"][aria-label]')
+        n_navs = await navs.count()
+        for i in range(min(n_navs, 5)):
+            nav = navs.nth(i)
+            mp_c = await nav.locator('a[href*="/marketplace"]').count()
+            if mp_c >= 3:
+                nav_label = (await nav.get_attribute("aria-label") or "").strip()
+                return nav, f'[role="navigation"][aria-label={nav_label!r}]'
+    except Exception:
+        pass
+
+    # Attempt 3 — main content landmark (pre-existing behaviour)
     for sel, tag in (('[role="main"]', '[role="main"]'), ("main", "main")):
         loc = page.locator(sel).first
         try:
@@ -1807,9 +2099,18 @@ async def _scan_category_tile_rows_in_root(
         vtext = await _link_accessible_label_text(loc)
         plausible, plausible_reason = _href_plausible_category_home_tile(href_s, slug, label)
         canonical = _href_has_canonical_category_path(eff, slug)
+        slug_in_cat_path = _href_has_slug_in_any_category_path(eff, slug)
+        # A href whose plausible_reason directly embeds the slug is strong even when
+        # the accessible label text cannot be read from the anchor element.
+        href_slug_strong = plausible and (plausible_reason in _SLUG_STRONG_HREF_REASONS)
 
         label_match_via_text = bool(label) and _visible_text_matches_category_label(vtext, label)
-        label_ok = (not label) or label_match_via_text or canonical
+        # label_ok: accept when:
+        #   • no label is configured (any plausible tile qualifies)
+        #   • accessible/visible text matches the label
+        #   • the URL path encodes the category slug (canonical or regional)
+        #   • the href reason is one that embeds the slug directly (belt-and-suspenders)
+        label_ok = (not label) or label_match_via_text or slug_in_cat_path or href_slug_strong
         label_match_reason = "n/a"
         if not label:
             label_match_reason = "no_label_configured"
@@ -1817,6 +2118,10 @@ async def _scan_category_tile_rows_in_root(
             label_match_reason = "accessible_name_or_inner_text"
         elif canonical:
             label_match_reason = "canonical_category_href_matches_slug"
+        elif slug_in_cat_path:
+            label_match_reason = "slug_in_regional_or_canonical_category_path"
+        elif href_slug_strong:
+            label_match_reason = "slug_strong_href_reason"
         else:
             label_match_reason = "no_match"
 
@@ -1835,6 +2140,8 @@ async def _scan_category_tile_rows_in_root(
             score += 50
         if label_match_via_text:
             score += 8
+        elif slug_in_cat_path and label:
+            score += 6
         elif canonical and label:
             score += 5
 
@@ -1891,16 +2198,113 @@ async def _scan_category_tile_rows_in_root(
     return rows, n_mp
 
 
+async def _fallback_label_link_scan(
+    page,
+    plan: SearchPlan,
+    *,
+    base_offset: int = 0,
+) -> list[dict[str, Any]]:
+    """
+    Last-resort scan: use Playwright's accessible-name matching to find any ``role=link``
+    whose name matches the category label, then accept it if the href looks like a
+    Marketplace browse URL.
+
+    This path fires only when the structured href+label scan yields zero eligible candidates —
+    for example, when Facebook renders tiles whose text lives outside the ``<a>`` element and
+    whose URL uses an opaque ``category_id`` that our slug logic cannot verify.  It is
+    intentionally broad on the label side and strict on the href side (must be in
+    ``/marketplace``, must not be an item detail or non-browse link).
+    """
+    slug = (plan.marketplace_category_slug or "").strip()
+    label = (plan.marketplace_category_label or "").strip()
+    if not label:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    try:
+        pat = re.compile(re.escape(label.strip()), re.I)
+        rl = page.get_by_role("link", name=pat)
+        n_rl = await rl.count()
+    except Exception:
+        return []
+
+    logger.debug(
+        "category_tile_fallback_label_scan: get_by_role(link, name=%r) found %s candidates",
+        label,
+        n_rl,
+    )
+
+    for i in range(min(n_rl, 30)):
+        loc = rl.nth(i)
+        try:
+            href = (await loc.get_attribute("href") or "").strip()
+        except Exception:
+            href = ""
+        if not href:
+            continue
+        href_l = href.lower()
+        if "/marketplace" not in href_l:
+            continue
+        if "/marketplace/item/" in href_l:
+            continue
+        if "/marketplace/you" in href_l or "/notifications" in href_l:
+            continue
+        if "/groups/" in href_l:
+            continue
+
+        eff = _effective_tile_href_for_matching(href)
+        vtext = await _link_accessible_label_text(loc)
+        plausible, plausible_reason = _href_plausible_category_home_tile(href, slug, label)
+        slug_in_path = _href_has_slug_in_any_category_path(eff, slug)
+
+        # Accept: label match via text (guaranteed by role=link name= filter) + any marketplace URL
+        score = 28  # lower base than structured scan to prefer it when both succeed
+        if plausible:
+            score += _category_tile_href_score(plausible_reason)
+        if slug_in_path:
+            score += 10
+
+        dedupe = (eff or eff or href).split("?", 1)[0].rstrip("/")
+        rows.append(
+            {
+                "scope": "page_label_fallback",
+                "source": "fallback_role_link_by_label",
+                "mp_index": None,
+                "visible_text": (vtext or "")[:160],
+                "href": (eff or href)[:400],
+                "raw_href": href[:400],
+                "label_matches_visible_text": True,
+                "label_match_reason": "fallback_accessible_name_match",
+                "href_plausible": True,
+                "href_plausible_reason": plausible_reason or "fallback_marketplace_href",
+                "eligible": True,
+                "score": score,
+                "dedupe_key": dedupe,
+                "candidate_index": base_offset + len(rows),
+            }
+        )
+        # Take the first acceptable match; caller can re-rank if needed.
+        break
+
+    return rows
+
+
 async def _find_marketplace_home_category_tile(
     page,
     plan: SearchPlan,
 ) -> tuple[Any, str, list[dict[str, Any]], dict[str, Any]]:
     """
-    Locate the category tile by visible / accessible label with Marketplace-only link candidates.
+    Locate the category tile by visible/accessible label with Marketplace-only link candidates.
 
-    Scopes to main (or ``<main>``) first; if nothing qualifies, rescans ``body`` so tiles outside
-    the primary landmark still match. Rejects unrelated ``/marketplace/search/?query=...`` links
-    unless the query clearly matches the configured category.
+    Scan order:
+      1. Primary scope (category nav section → main landmark → body fallback).
+      2. ``body`` rescan if primary scope yields no eligible rows and it wasn't already body.
+      3. ``_fallback_label_link_scan``: Playwright get_by_role("link", name=label) as last resort
+         when the structured href+label scan still yields zero eligible candidates.
+
+    Rejects unrelated ``/marketplace/search/?query=...`` links unless the query clearly matches
+    the configured category.  Logs the top-8 candidates with their reject/accept reasons so
+    diagnosis from logs is straightforward.
     """
     slug = (plan.marketplace_category_slug or "").strip()
     label = (plan.marketplace_category_label or "").strip()
@@ -1908,12 +2312,14 @@ async def _find_marketplace_home_category_tile(
     scan: dict[str, Any] = {
         "category_tile_scope_root": None,
         "category_tile_fallback_used": False,
+        "category_tile_label_fallback_used": False,
         "category_tile_marketplace_anchors_scanned": 0,
         "category_tile_anchors_scanned": 0,
         "category_tile_main_phase_candidates_total": 0,
         "category_tile_main_phase_eligible": 0,
         "category_tile_role_named_links_note": (
-            "role=link name regex only augments marketplace href scan; never used alone."
+            "role=link name regex augments marketplace href scan; "
+            "_fallback_label_link_scan fires only when eligible=0 after all phases."
         ),
         "category_tile_candidates_total": 0,
         "category_tile_candidates_label_ok": 0,
@@ -1929,12 +2335,19 @@ async def _find_marketplace_home_category_tile(
         return rows, n_mp
 
     primary_root, primary_tag = await _marketplace_home_category_primary_scope(page)
+    logger.debug(
+        "category_tile_scan: primary_scope=%r slug=%r label=%r",
+        primary_tag, slug, label,
+    )
     rows, _ = await run_phase(primary_root, primary_tag)
     scan["category_tile_main_phase_candidates_total"] = len(rows)
     scan["category_tile_main_phase_eligible"] = sum(1 for r in rows if r.get("eligible"))
 
     eligible = [r for r in rows if r.get("eligible")]
     if not eligible and primary_tag != "body":
+        logger.debug(
+            "category_tile_scan: no eligible in primary scope=%r, rescanning body", primary_tag
+        )
         body_root = page.locator("body").first
         scan["category_tile_fallback_used"] = True
         rows, _ = await run_phase(body_root, "body")
@@ -1944,66 +2357,117 @@ async def _find_marketplace_home_category_tile(
     scan["category_tile_candidates_href_plausible"] = sum(1 for r in rows if r.get("href_plausible"))
     scan["category_tile_candidates_eligible"] = sum(1 for r in rows if r.get("eligible"))
 
+    # Emit per-candidate diagnostics for the top-8 by href_plausible + score so that log
+    # analysis can explain exactly why a candidate was accepted or rejected.
+    _log_top_candidates(rows, plan, phase="structured")
+
     eligible = [r for r in rows if r.get("eligible")]
+    if not eligible:
+        # Phase 3 — pure accessible-name fallback
+        logger.info(
+            "category_tile_scan: structured scan found 0 eligible; "
+            "trying pure-label fallback slug=%r label=%r total_candidates=%s",
+            slug, label, len(rows),
+        )
+        fallback_rows = await _fallback_label_link_scan(page, plan, base_offset=len(rows))
+        if fallback_rows:
+            rows = rows + fallback_rows
+            scan["category_tile_label_fallback_used"] = True
+            scan["category_tile_candidates_total"] = len(rows)
+            scan["category_tile_candidates_eligible"] += len(
+                [r for r in fallback_rows if r.get("eligible")]
+            )
+            _log_top_candidates(fallback_rows, plan, phase="fallback")
+        eligible = [r for r in rows if r.get("eligible")]
+
     if not eligible:
         return None, "", rows, scan
 
-    best_row = max(eligible, key=lambda r: (r["score"], r.get("candidate_index", 0)))
+    best_row = max(eligible, key=lambda r: (r["score"], -r.get("candidate_index", 0)))
     ci = int(best_row["candidate_index"])
     scope = best_row.get("scope") or scan["category_tile_scope_root"]
-    root_for_pick = page.locator("body").first
-    if scope in ("[role=\"main\"]", "main"):
-        root_for_pick, _ = await _marketplace_home_category_primary_scope(page)
 
-    mp = root_for_pick.locator('a[href*="/marketplace"]')
-    chosen_loc = None
-    try:
-        n_mp = await mp.count()
-        target_eff = (best_row.get("href") or "").split("?", 1)[0].rstrip("/")
-        for i in range(n_mp):
-            loc = mp.nth(i)
-            try:
-                href = await loc.get_attribute("href")
-            except Exception:
-                href = None
-            eff = _effective_tile_href_for_matching((href or "").strip())
-            cand_eff = (eff or "").split("?", 1)[0].rstrip("/")
-            if target_eff and cand_eff == target_eff:
-                chosen_loc = loc
-                break
-        if chosen_loc is None:
-            pat = re.compile(re.escape((label or slug or "").strip()), re.I) if (label or slug) else None
+    # For fallback rows the locator is already implicitly page-level; for structured rows we
+    # re-locate inside the appropriate scope root so stale locators are not reused.
+    if best_row.get("source") == "fallback_role_link_by_label":
+        # Re-issue the accessible-name lookup to get a fresh locator.
+        chosen_loc = None
+        try:
+            pat = re.compile(re.escape(label.strip()), re.I) if label else None
             if pat:
-                rl = root_for_pick.get_by_role("link", name=pat)
-                for i in range(await rl.count()):
+                rl = page.get_by_role("link", name=pat)
+                target_href_base = (best_row.get("href") or "").split("?", 1)[0].rstrip("/")
+                for i in range(min(await rl.count(), 30)):
                     loc = rl.nth(i)
-                    try:
-                        href = await loc.get_attribute("href")
-                    except Exception:
-                        href = None
-                    eff = _effective_tile_href_for_matching((href or "").strip())
-                    cand_eff = (eff or "").split("?", 1)[0].rstrip("/")
-                    if target_eff and cand_eff == target_eff:
+                    href_v = (await loc.get_attribute("href") or "").strip()
+                    eff = _effective_tile_href_for_matching(href_v)
+                    if "/marketplace" not in href_v.lower():
+                        continue
+                    if "/marketplace/item/" in href_v.lower():
+                        continue
+                    cand_base = (eff or href_v).split("?", 1)[0].rstrip("/")
+                    if target_href_base and cand_base == target_href_base:
                         chosen_loc = loc
                         break
-    except Exception:
-        chosen_loc = None
-
-    if chosen_loc is None:
-        mi = best_row.get("mp_index")
-        if isinstance(mi, int) and mi >= 0:
-            try:
-                chosen_loc = mp.nth(mi)
-            except Exception:
-                chosen_loc = None
-
-    if chosen_loc is None and slug:
-        try:
-            cat_loc = root_for_pick.locator(f'a[href*="/marketplace/category/{slug}"]')
-            if await cat_loc.count() > 0:
-                chosen_loc = cat_loc.first
+                    if chosen_loc is None:
+                        # Accept first matching marketplace link if href shifted (SPA update)
+                        chosen_loc = loc
         except Exception:
-            pass
+            chosen_loc = None
+    else:
+        root_for_pick = page.locator("body").first
+        if scope in ('[role="main"]', "main"):
+            root_for_pick, _ = await _marketplace_home_category_primary_scope(page)
+
+        mp = root_for_pick.locator('a[href*="/marketplace"]')
+        chosen_loc = None
+        try:
+            n_mp = await mp.count()
+            target_eff = (best_row.get("href") or "").split("?", 1)[0].rstrip("/")
+            for i in range(n_mp):
+                loc = mp.nth(i)
+                try:
+                    href = await loc.get_attribute("href")
+                except Exception:
+                    href = None
+                eff = _effective_tile_href_for_matching((href or "").strip())
+                cand_eff = (eff or "").split("?", 1)[0].rstrip("/")
+                if target_eff and cand_eff == target_eff:
+                    chosen_loc = loc
+                    break
+            if chosen_loc is None:
+                pat = re.compile(re.escape((label or slug or "").strip()), re.I) if (label or slug) else None
+                if pat:
+                    rl = root_for_pick.get_by_role("link", name=pat)
+                    for i in range(await rl.count()):
+                        loc = rl.nth(i)
+                        try:
+                            href = await loc.get_attribute("href")
+                        except Exception:
+                            href = None
+                        eff = _effective_tile_href_for_matching((href or "").strip())
+                        cand_eff = (eff or "").split("?", 1)[0].rstrip("/")
+                        if target_eff and cand_eff == target_eff:
+                            chosen_loc = loc
+                            break
+        except Exception:
+            chosen_loc = None
+
+        if chosen_loc is None:
+            mi = best_row.get("mp_index")
+            if isinstance(mi, int) and mi >= 0:
+                try:
+                    chosen_loc = mp.nth(mi)
+                except Exception:
+                    chosen_loc = None
+
+        if chosen_loc is None and slug:
+            try:
+                cat_loc = root_for_pick.locator(f'a[href*="/marketplace/category/{slug}"]')
+                if await cat_loc.count() > 0:
+                    chosen_loc = cat_loc.first
+            except Exception:
+                pass
 
     if chosen_loc is None:
         return None, "", rows, scan
@@ -2017,6 +2481,37 @@ async def _find_marketplace_home_category_tile(
         f"visible={best_row.get('visible_text')!r} {match_explain}"
     )
     return chosen_loc, selector_used, rows, scan
+
+
+def _log_top_candidates(
+    rows: list[dict[str, Any]],
+    plan: SearchPlan,
+    *,
+    phase: str = "structured",
+    n: int = 8,
+) -> None:
+    """Emit INFO-level rows for the top-N scan candidates, sorted by score desc."""
+    if not rows:
+        return
+    ranked = sorted(rows, key=lambda r: (r.get("href_plausible", False), r.get("score", 0)), reverse=True)
+    for rank, row in enumerate(ranked[:n]):
+        logger.info(
+            "Marketplace UI: category_tile_candidate phase=%s user_id=%s rank=%s "
+            "eligible=%s score=%s label_ok=%s href_plausible=%s "
+            "visible_text=%r href=%r label_reason=%r href_reason=%r source=%r",
+            phase,
+            plan.user_id,
+            rank,
+            row.get("eligible"),
+            row.get("score"),
+            row.get("label_matches_visible_text"),
+            row.get("href_plausible"),
+            (row.get("visible_text") or "")[:80],
+            (row.get("href") or "")[:120],
+            row.get("label_match_reason"),
+            row.get("href_plausible_reason"),
+            row.get("source"),
+        )
 
 
 async def _wait_for_category_tile_on_marketplace_home(
@@ -2066,6 +2561,7 @@ async def _navigate_to_category_via_marketplace_home(page, plan: SearchPlan) -> 
         "category_tile_candidates_label_ok": None,
         "category_tile_candidates_href_plausible": None,
         "category_tile_fallback_used": None,
+        "category_tile_label_fallback_used": None,
         "category_tile_candidates_snapshot": None,
         "category_navigation_expected_canonical": canonical,
         "category_page_feed_probe": None,
@@ -2100,12 +2596,13 @@ async def _navigate_to_category_via_marketplace_home(page, plan: SearchPlan) -> 
         "category_tile_candidates_href_plausible"
     )
     meta["category_tile_fallback_used"] = scan_meta.get("category_tile_fallback_used")
+    meta["category_tile_label_fallback_used"] = scan_meta.get("category_tile_label_fallback_used")
     meta["category_tile_candidates_snapshot"] = list(scan_rows[:16])
 
     logger.info(
         "Marketplace UI: marketplace_home_category_tile_scan user_id=%s scope_root=%s "
         "marketplace_anchors_scanned=%s candidates_total=%s label_ok=%s href_plausible=%s "
-        "eligible=%s body_fallback=%s",
+        "eligible=%s body_fallback=%s label_fallback=%s",
         plan.user_id,
         meta["category_tile_scope_root"],
         meta["category_tile_anchors_scanned"],
@@ -2114,13 +2611,61 @@ async def _navigate_to_category_via_marketplace_home(page, plan: SearchPlan) -> 
         meta["category_tile_candidates_href_plausible"],
         meta["category_tile_candidates_eligible"],
         meta["category_tile_fallback_used"],
+        meta["category_tile_label_fallback_used"],
     )
 
     if tile is None:
+        # Emit diagnostic snapshot of all plausible-but-rejected candidates so the operator can
+        # see the exact visible text and href that were considered before the error.
+        plausible_rows = [r for r in scan_rows if r.get("href_plausible")]
+        logger.error(
+            "Marketplace UI: category_tile_not_found user_id=%s slug=%r label=%r "
+            "scope_root=%r total_candidates=%s plausible=%s eligible=%s "
+            "body_fallback=%s label_fallback=%s",
+            plan.user_id, slug, label,
+            meta["category_tile_scope_root"],
+            meta["category_tile_candidates_total"],
+            len(plausible_rows),
+            meta["category_tile_candidates_eligible"],
+            meta["category_tile_fallback_used"],
+            meta["category_tile_label_fallback_used"],
+        )
+        for i, row in enumerate(plausible_rows[:10]):
+            logger.error(
+                "Marketplace UI: category_tile_plausible_rejected user_id=%s rank=%s "
+                "visible_text=%r href=%r label_ok=%s label_reason=%r href_reason=%r",
+                plan.user_id, i,
+                (row.get("visible_text") or "")[:80],
+                (row.get("href") or "")[:120],
+                row.get("label_matches_visible_text"),
+                row.get("label_match_reason"),
+                row.get("href_plausible_reason"),
+            )
         raise MarketplaceFilterError(
             f"Could not find category tile for slug={slug!r} label={label!r} on Marketplace home "
-            f"(scoped to {meta['category_tile_scope_root']!r}; expected visible label matching {label!r} "
-            f"and a plausible category browse href, not unrelated marketplace/search links)."
+            f"(scope={meta['category_tile_scope_root']!r} candidates={meta['category_tile_candidates_total']} "
+            f"plausible={len(plausible_rows)} eligible={meta['category_tile_candidates_eligible']}; "
+            f"see category_tile_candidate log entries above for per-candidate reject reasons).",
+            detail={
+                "slug": slug,
+                "label": label,
+                "scope_root": meta["category_tile_scope_root"],
+                "candidates_total": meta["category_tile_candidates_total"],
+                "candidates_plausible": len(plausible_rows),
+                "candidates_eligible": meta["category_tile_candidates_eligible"],
+                "body_fallback": meta["category_tile_fallback_used"],
+                "label_fallback": meta["category_tile_label_fallback_used"],
+                "top_plausible_snapshot": [
+                    {
+                        "visible_text": (r.get("visible_text") or "")[:80],
+                        "href": (r.get("href") or "")[:120],
+                        "label_ok": r.get("label_matches_visible_text"),
+                        "label_reason": r.get("label_match_reason"),
+                        "href_reason": r.get("href_plausible_reason"),
+                    }
+                    for r in plausible_rows[:6]
+                ],
+            },
         )
 
     meta["category_tile_selector_used"] = selector_used
@@ -2158,13 +2703,16 @@ async def _navigate_to_category_via_marketplace_home(page, plan: SearchPlan) -> 
     )
     logger.info(
         "Marketplace UI: category_tile_clicked user_id=%s url_before=%s slug=%r label=%r "
-        "selector=%s tile_text=%r",
+        "tile_href=%r tile_text=%r label_match_reason=%r href_plausible_reason=%r score=%s",
         plan.user_id,
         url_before,
         slug,
         label,
-        selector_used,
+        (chosen_row or {}).get("href"),
         meta["category_tile_label_clicked"],
+        (chosen_row or {}).get("label_match_reason"),
+        (chosen_row or {}).get("href_plausible_reason"),
+        (chosen_row or {}).get("score"),
     )
 
     await tile.scroll_into_view_if_needed()
@@ -2179,12 +2727,14 @@ async def _navigate_to_category_via_marketplace_home(page, plan: SearchPlan) -> 
     except Exception:
         meta["page_title_after_category_click"] = None
 
+    url_changed = meta["url_after_category_click"] != url_before
     logger.info(
-        "Marketplace UI: category_navigation_url_after_click user_id=%s url_before=%s url_after=%s "
-        "title=%r",
+        "Marketplace UI: category_navigation_url_after_click user_id=%s "
+        "url_before=%s url_after=%s url_changed=%s title=%r",
         plan.user_id,
         url_before,
         meta["url_after_category_click"],
+        url_changed,
         meta["page_title_after_category_click"],
     )
 
@@ -2197,9 +2747,12 @@ async def _navigate_to_category_via_marketplace_home(page, plan: SearchPlan) -> 
 
     if ok:
         logger.info(
-            "Marketplace UI: category_navigation_accepted user_id=%s reason=%r signals=%s",
+            "Marketplace UI: category_navigation_accepted user_id=%s reason=%r "
+            "url_after=%s title=%r signals=%s",
             plan.user_id,
             reason,
+            meta["url_after_category_click"],
+            meta["page_title_after_category_click"],
             sigs,
         )
     else:
