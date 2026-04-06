@@ -6,7 +6,7 @@ center_lat/center_lon/radius_km are available for future radius filtering.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.domain import UserSettings as UserSettingsRow
@@ -31,6 +31,10 @@ class CollectionInputs:
     radius_hint: str
     # Geoapify boundary context — needed for city-token geo checks (same as profile.boundary_context).
     boundary_context: dict | None = None
+    # Source IDs/URLs already persisted in MongoDB for this user.
+    # Used by the collector to skip detail-page enrichment on known duplicates before they
+    # reach the pipeline Step-2 dedupe.  Populated by main.py before each live-poll collection.
+    known_source_ids: frozenset[str] = field(default_factory=frozenset)
 
 
 def _nearby_and_related_areas(profile: UserSettingsRow) -> list[str]:

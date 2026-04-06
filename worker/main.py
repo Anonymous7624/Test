@@ -50,11 +50,51 @@ def _mock_collector_enabled() -> bool:
     )
 
 
+def _get_known_source_ids(db: Database, user_id: int, limit: int = 500) -> frozenset[str]:
+    """
+    Fetch recently stored source IDs and source links for this user from MongoDB.
+
+    These are passed to the collector so it can skip detail-page enrichment for listings
+    already saved, avoiding wasted browser page-visits before the Step-2 pipeline dedupe.
+    Returns an empty frozenset on any DB error (fail-open; dedupe still happens in Step 2).
+    """
+    try:
+        ids: set[str] = set()
+        for doc in db["listings"].find(
+            {"user_id": user_id},
+            {"source_id": 1, "source_link": 1, "_id": 0},
+            limit=limit,
+            sort=[("_id", -1)],
+        ):
+            sid = (doc.get("source_id") or "").strip()
+            if sid:
+                ids.add(sid)
+            # Also index the normalised URL so raw source_link hits work.
+            slink = (doc.get("source_link") or "").strip()
+            if slink:
+                ids.add(slink)
+        return frozenset(ids)
+    except Exception as exc:
+        logger.warning(
+            "Pre-collector dedupe: could not load known_source_ids user_id=%s: %s",
+            user_id,
+            exc,
+        )
+        return frozenset()
+
+
 async def _collect_raws(
-    profile: UserSettingsRow, *, backfill: bool
+    profile: UserSettingsRow,
+    *,
+    backfill: bool,
+    known_source_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[RawListing], dict]:
     """Returns (raw listings, collector metadata e.g. degraded UI mode)."""
+    from dataclasses import replace as _dc_replace  # noqa: PLC0415
+
     inputs = build_collection_inputs(profile)
+    if known_source_ids:
+        inputs = _dc_replace(inputs, known_source_ids=known_source_ids)
     validate_search_plan_for_step1(inputs.search_plan)
     if _mock_collector_enabled():
         logger.warning(
@@ -300,8 +340,18 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
     repo.replace_settings(s)
     prior_collector_failure = s.worker_last_collector_failure_message
     _begin_listing_collection(repo, s, now, backfill=False)
+    # Load persisted source IDs so the collector can skip detail-page enrichment for duplicates
+    # before they hit the Step-2 pipeline dedupe.  Fail-open: if the query fails we still collect.
+    live_known_ids = _get_known_source_ids(db, s.user_id)
+    if live_known_ids:
+        logger.info(
+            "Pre-collector dedupe: user_id=%s known_source_ids_loaded=%s "
+            "(detail-enrich will be skipped for these)",
+            s.user_id,
+            len(live_known_ids),
+        )
     try:
-        raws, collector_meta = await _collect_raws(s, backfill=False)
+        raws, collector_meta = await _collect_raws(s, backfill=False, known_source_ids=live_known_ids)
     except SearchPlanInvalidError as exc:
         _persist_configuration_error(
             repo, s, now, backfill=False, message=str(exc)
@@ -334,8 +384,18 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
     )
     if raws:
         stats = process_batch(db, raws, profile=s, origin_type="live")
+        screen = collector_meta.get("screen_summary") or {}
         print(
-            f"[user={s.user_id}] live batch: saved={stats.step4_saved} alerts_sent={stats.alerts_sent}",
+            f"[user={s.user_id}] live batch: "
+            f"collected={screen.get('collected_from_page', len(raws))} "
+            f"early_loc_rejected={screen.get('rejected_early_by_visible_location', 0)} "
+            f"unknown_loc={screen.get('unknown_location_passed', 0)} "
+            f"pre_enrich_dupes={screen.get('pre_enrich_known_dupes', 0)} "
+            f"detail_enriched={screen.get('detail_enriched_ok', 0)} "
+            f"passed_to_pipeline={len(raws)} "
+            f"step2_matched={stats.step2_matched} "
+            f"saved={stats.step4_saved} "
+            f"alerts_sent={stats.alerts_sent}",
             flush=True,
         )
     else:
@@ -383,10 +443,10 @@ async def main_loop() -> None:
     logging.getLogger("collector.playwright_collector").setLevel(logging.INFO)
 
     ensure_indexes(get_database())
-    interval = float(os.environ.get("WORKER_POLL_SECONDS", "300"))
+    interval = float(os.environ.get("WORKER_POLL_SECONDS", "150"))
     print(
         f"Worker started. MONGODB_URI={settings.mongodb_uri} db={settings.mongodb_database} "
-        f"poll={interval}s (default 300 = 5 min) mock_collector={_mock_collector_enabled()}",
+        f"poll={interval}s (default 150 = 2.5 min) mock_collector={_mock_collector_enabled()}",
         flush=True,
     )
     while True:

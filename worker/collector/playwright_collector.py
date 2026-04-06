@@ -364,6 +364,40 @@ def _early_location_screen(
     return passed, rejected, unknown
 
 
+def _quick_location_reject_count(
+    batch: list[RawListing],
+    collection_inputs: CollectionInputs,
+) -> int:
+    """
+    Count how many cards in ``batch`` would fail the early location screen without logging each one.
+
+    Used for the adaptive scroll-stop heuristic: if a whole scroll round produces only
+    out-of-radius cards, continuing to scroll will likely produce more of the same, so we
+    stop early.  Returns 0 when no parsed card locations are present (unknown ≠ rejected).
+    """
+    # Lazy import; backend/ is on sys.path before this is ever called.
+    from app.services.geo_filter import listing_within_user_radius  # noqa: PLC0415
+
+    rejected = 0
+    for raw in batch:
+        parsed_loc = (raw.listing_location_parsed or "").strip()
+        if not parsed_loc:
+            continue  # unknown location — cannot reject on card text alone
+        within = listing_within_user_radius(
+            user_lat=collection_inputs.center_lat,
+            user_lon=collection_inputs.center_lon,
+            radius_km=collection_inputs.radius_km,
+            boundary_context=collection_inputs.boundary_context,
+            user_location_text=collection_inputs.location_text,
+            listing_lat=None,
+            listing_lon=None,
+            listing_location_text=parsed_loc,
+        )
+        if not within:
+            rejected += 1
+    return rejected
+
+
 async def _parse_stub_page(
     page,
     *,
@@ -622,15 +656,17 @@ async def _maybe_enrich_listings_from_detail_pages(
     collection_inputs: CollectionInputs,
 ) -> tuple[list[RawListing], dict]:
     """
-    Screen by card-visible location, then optionally visit detail pages for richer data.
+    Screen by card-visible location and pre-enrichment duplicate check, then visit detail pages.
 
     Returns ``(result_listings, screen_meta)``.  ``screen_meta`` keys:
 
     - ``collected_from_page``: items entering this stage
     - ``rejected_early_by_visible_location``: dropped because card location text is outside radius
     - ``unknown_location_passed``: no parsed card location → passed without screening
+    - ``pre_enrich_known_dupes``: items skipped because their source_id/link is already in MongoDB
     - ``allowed_to_detail_enrich``: items that entered detail-page enrichment
     - ``detail_enriched_ok``: items successfully enriched with detail-page data
+    - ``final_candidates``: items returned for pipeline processing
     """
     user_id = collection_inputs.user_id
     max_n = _int_env("WORKER_COLLECTOR_DETAIL_ENRICH_MAX", 25)
@@ -642,28 +678,73 @@ async def _maybe_enrich_listings_from_detail_pages(
     logger.info(
         "Step 1 card-loc-screen user_id=%s: "
         "collected_from_page=%s rejected_early_by_visible_location=%s "
-        "unknown_location_passed=%s allowed_to_detail_enrich=%s",
+        "unknown_location_passed=%s loc_screened_survivors=%s",
         user_id,
         len(items),
         early_reject_n,
         unknown_n,
         len(screened),
     )
+
+    # ── Pre-enrichment duplicate screen (listings already in MongoDB for this user) ──────────
+    known_ids = collection_inputs.known_source_ids
+    pre_dedup: list[RawListing] = []
+    known_dupes_n = 0
+    if known_ids:
+        for raw in screened:
+            sid = (raw.source_id or "").strip()
+            slink = (raw.source_link or "").strip()
+            if (sid and sid in known_ids) or (slink and slink in known_ids):
+                known_dupes_n += 1
+                logger.info(
+                    "Step 1 pre-enrich-dedupe user_id=%s source_id=%r "
+                    "(already in DB — detail-enrich skipped)",
+                    user_id,
+                    sid or slink,
+                )
+            else:
+                pre_dedup.append(raw)
+    else:
+        pre_dedup = screened
+
+    if known_dupes_n:
+        logger.info(
+            "Step 1 pre-enrich-dedupe summary user_id=%s: "
+            "known_dupes_skipped=%s loc_screened_survivors=%s after_dedup=%s",
+            user_id,
+            known_dupes_n,
+            len(screened),
+            len(pre_dedup),
+        )
+
     screen_meta: dict = {
         "collected_from_page": len(items),
         "rejected_early_by_visible_location": early_reject_n,
         "unknown_location_passed": unknown_n,
-        "allowed_to_detail_enrich": len(screened),
+        "pre_enrich_known_dupes": known_dupes_n,
+        "allowed_to_detail_enrich": len(pre_dedup),
         "detail_enriched_ok": 0,
+        "final_candidates": 0,
     }
 
-    if max_n <= 0 or not screened:
-        return screened, screen_meta
+    if max_n <= 0 or not pre_dedup:
+        screen_meta["final_candidates"] = len(pre_dedup)
+        logger.info(
+            "Step 1 final-candidates user_id=%s: "
+            "collected=%s early_loc_rejected=%s pre_enrich_dupes=%s "
+            "final_to_pipeline=%s (enrich disabled or empty)",
+            user_id,
+            len(items),
+            early_reject_n,
+            known_dupes_n,
+            len(pre_dedup),
+        )
+        return pre_dedup, screen_meta
 
-    # ── Detail-page enrichment for the screened survivors ────────────────────────────────────
+    # ── Detail-page enrichment for the screened, deduped survivors ───────────────────────────
     out: list[RawListing] = []
     enriched_n = 0
-    for i, raw in enumerate(screened):
+    for i, raw in enumerate(pre_dedup):
         if i >= max_n:
             out.append(raw)
             continue
@@ -682,12 +763,26 @@ async def _maybe_enrich_listings_from_detail_pages(
             out.append(raw)
 
     screen_meta["detail_enriched_ok"] = enriched_n
+    screen_meta["final_candidates"] = len(out)
     logger.info(
-        "Step 1 detail-page enrich: user_id=%s attempted=%s enriched_ok=%s screened_total=%s",
+        "Step 1 detail-page enrich: user_id=%s attempted=%s enriched_ok=%s "
+        "after_dedup_input=%s",
         user_id,
-        min(len(screened), max_n),
+        min(len(pre_dedup), max_n),
         enriched_n,
-        len(screened),
+        len(pre_dedup),
+    )
+    logger.info(
+        "Step 1 final-candidates user_id=%s: "
+        "collected=%s early_loc_rejected=%s unknown_loc=%s "
+        "pre_enrich_dupes=%s detail_enriched=%s final_to_pipeline=%s",
+        user_id,
+        len(items),
+        early_reject_n,
+        unknown_n,
+        known_dupes_n,
+        enriched_n,
+        len(out),
     )
     return out, screen_meta
 
@@ -755,12 +850,14 @@ async def _collect_marketplace_feed_for_query(
             )
 
         new_this = 0
+        new_cards_this_round: list[RawListing] = []
         for r in batch:
             dk = _raw_dedupe_key(r)
             if dk in seen:
                 continue
             seen.add(dk)
             out.append(r)
+            new_cards_this_round.append(r)
             new_this += 1
             if len(out) >= per_query_cap:
                 break
@@ -785,6 +882,30 @@ async def _collect_marketplace_feed_for_query(
         if len(out) >= per_query_cap:
             meta["stopped_reason"] = "per_query_cap"
             break
+
+        # Adaptive early stop: if every new card this round has a parsed location AND all are
+        # outside the user's radius, further scrolling will almost certainly produce more of the
+        # same off-target results — stop now to save time.
+        if (
+            round_idx >= 1
+            and new_this >= 3
+            and len(out) >= 3
+        ):
+            parsed_in_round = sum(1 for r in new_cards_this_round if (r.listing_location_parsed or "").strip())
+            if parsed_in_round == new_this:
+                quick_rejects = _quick_location_reject_count(new_cards_this_round, collection_inputs)
+                if quick_rejects == new_this:
+                    logger.info(
+                        "Step 1 adaptive-stop query=%r round=%s: "
+                        "all %s new cards have parsed locations and all are outside radius — "
+                        "stopping scroll early (cumulative=%s)",
+                        expected_query,
+                        round_idx,
+                        new_this,
+                        len(out),
+                    )
+                    meta["stopped_reason"] = "adaptive_early_location_reject"
+                    break
 
         if round_idx >= 1 and new_this == 0:
             idle += 1
@@ -1075,6 +1196,8 @@ async def fetch_listings_playwright(
                         # Surface date-listed filter status so callers can distinguish it from
                         # location_mismatch rejects (which come from Step 2 geo check, not the filter).
                         "date_listed_24h_selected": ui_applied.get("date_listed_24h_selected"),
+                        # Enrich/screen summary for batch status reporting in main.py.
+                        "screen_summary": enrich_meta,
                     }
                     logger.info(
                         "Collector success: listings=%s source=%s user_id=%s",

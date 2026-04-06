@@ -631,19 +631,62 @@ async def _resolve_filters_root_for_category_date_filter(
     page, drawer_info: dict[str, Any]
 ) -> tuple[Any, str, str]:
     """
-    For marketplace_category Date listed flow: prefer left rail scope when visible.
+    For marketplace_category Date listed flow: prefer the narrowest stable left-rail scope.
+
+    Resolution order (cleanest → fallback):
+      1. Narrowest left-rail container from ``_find_left_filters_container_scope`` [clean]
+      2. ``[role="main"]`` when Date listed is directly visible there [clean]
+      3. Best root from probe/drawer info (may be page-wide) [fallback]
+
     Returns (root, surface_label, narrow_detail).
     """
+    # ── Tier 1: narrowest left-rail container (best case) ────────────────────────────────────
     container, narrow_detail = await _find_left_filters_container_scope(page)
     if container is not None:
         logger.info(
-            "Marketplace UI: filters_root narrowed to left filter container detail=%s",
+            "Marketplace UI: [FILTER:clean] filters_root=left_filter_rail "
+            "(narrowed to left filter container) detail=%s",
             narrow_detail,
         )
         return container, "left_filter_rail", narrow_detail
 
+    # ── Tier 2: [role="main"] with a visible Date listed element ─────────────────────────────
+    # On category pages, the filter rail is always inside [role="main"].  Prefer the main
+    # landmark over a page-wide root even when the narrower container wasn't identified.
+    main = page.locator('[role="main"]')
+    try:
+        if await main.count() > 0:
+            dl, dl_pat = await _date_listed_text_locator_in_scope(main)
+            if dl is not None and await _locator_visible_and_enabled(dl):
+                logger.info(
+                    "Marketplace UI: [FILTER:clean] filters_root=left_sidebar_main "
+                    "(Date listed visible in [role=main]) detail=%s",
+                    dl_pat,
+                )
+                return main, "left_sidebar_main", f"main_has_date_listed:{dl_pat}"
+            # Date listed text is in the DOM but not yet visible/enabled — still prefer main
+            # over a page-wide root for category mode.
+            if dl is not None:
+                logger.info(
+                    "Marketplace UI: [FILTER:clean] filters_root=left_sidebar_main "
+                    "(Date listed in main DOM, not yet enabled) detail=%s",
+                    dl_pat,
+                )
+                return main, "left_sidebar_main", f"main_has_date_listed_dom_only:{dl_pat}"
+    except Exception as exc:
+        logger.debug(
+            "Marketplace UI: filters_root tier-2 main check failed (%s); falling to tier-3",
+            exc,
+        )
+
+    # ── Tier 3: last resort — probe/drawer result (may be page-wide) ─────────────────────────
     root, label = await _find_best_filters_root(page, drawer_info)
-    return root, label, "used_best_filters_root"
+    logger.info(
+        "Marketplace UI: [FILTER:fallback] filters_root=%s "
+        "(left_filter_rail and left_sidebar_main not matched — using probe/drawer result)",
+        label,
+    )
+    return root, label, "used_best_filters_root_fallback"
 
 
 async def _probe_date_listed_root(page) -> tuple[Any, str, str]:
@@ -672,6 +715,10 @@ async def _probe_date_listed_root(page) -> tuple[Any, str, str]:
                 await page.wait_for_timeout(200)
                 if await _locator_visible_and_enabled(dl):
                     return main, "inline_main", f"date_listed_in_main:{pat}"
+                # Date listed text is in main DOM but not yet visible/enabled — still prefer
+                # inline_main over page-scope so the category-mode filter root resolver
+                # uses [role="main"] rather than a page-wide root.
+                return main, "inline_main", f"date_listed_in_main_dom_only:{pat}"
         except Exception:
             pass
 
@@ -3181,6 +3228,31 @@ async def apply_marketplace_filters_ui(
                     exc_v,
                 )
 
+        # ── Clear one-line filter outcome log (easy to grep) ────────────────────────────────────
+        _filter_tier = (
+            "clean"
+            if surface_label in ("left_filter_rail", "left_sidebar_main")
+            else "fallback"
+        )
+        if applied.get("date_listed_24h_selected"):
+            logger.info(
+                "Marketplace UI: [FILTER:%s] Date listed → Last 24h CONFIRMED "
+                "user_id=%s surface=%s verify=%s",
+                _filter_tier,
+                plan.user_id,
+                surface_label,
+                applied.get("date_listed_verify_detail"),
+            )
+        else:
+            logger.warning(
+                "Marketplace UI: [FILTER:failed] Date listed → Last 24h NOT APPLIED "
+                "user_id=%s surface=%s verify_detail=%s error=%s",
+                plan.user_id,
+                surface_label,
+                applied.get("date_listed_verify_detail"),
+                (applied.get("date_listed_error") or "")[:200] or None,
+            )
+
         if not applied.get("date_listed_24h_selected"):
             applied["degraded_mode"] = True
             prev = (applied.get("worker_collector_warning") or "").strip()
@@ -3283,25 +3355,31 @@ async def apply_marketplace_filters_ui(
             plan.user_id,
         )
 
+    # Determine filter tier for summary (clean = left rail/main, fallback = other, failed = not applied)
+    _final_tier: str
+    if sm_cat:
+        if applied.get("date_listed_24h_selected"):
+            _final_tier = (
+                "clean"
+                if applied.get("filters_surface") in ("left_filter_rail", "left_sidebar_main")
+                else "fallback"
+            )
+        else:
+            _final_tier = "failed"
+    else:
+        _final_tier = "n/a"
+
     logger.info(
-        "Marketplace UI: filter cycle summary user_id=%s location_radius_ok=%s drawer_open=%s "
-        "surface_resolved=%s inline_filters=%s drawer_mode=%s degraded=%s sort=%s confirmed=%s "
-        "surface=%s date_listed_attempted=%s date_listed_24h=%s section_found=%s last24_clicked=%s "
-        "date_verify_ok=%s date_err=%s",
+        "Marketplace UI: filter cycle summary user_id=%s filter_tier=%s "
+        "location_radius_ok=%s surface=%s degraded=%s sort=%s "
+        "date_listed_24h=%s date_verify_ok=%s date_err=%s",
         plan.user_id,
+        _final_tier,
         applied["location_radius_ok"],
-        applied["filters_drawer_opened"],
-        applied.get("filters_surface_resolved"),
-        applied.get("filters_inline_detected"),
-        applied.get("filters_drawer_mode"),
+        applied.get("filters_surface"),
         applied["degraded_mode"],
         applied["sort_ui"],
-        applied.get("filters_confirmed"),
-        applied.get("filters_surface"),
-        applied.get("date_listed_filter_attempted"),
         applied.get("date_listed_24h_selected"),
-        applied.get("date_listed_section_found"),
-        applied.get("date_listed_last_24h_clicked"),
         applied.get("date_listed_verify_ok"),
         (applied.get("date_listed_error") or "")[:120] or None,
     )
