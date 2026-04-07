@@ -192,7 +192,7 @@ export default function DashboardPage() {
                 <div>
                   <dt className="text-zinc-600">Last fatal error</dt>
                   <dd className="text-xs text-red-300/90">
-                    {(worker.admin_pipeline_snapshot.last_error as string | null) || "—"}
+                    {(worker.admin_pipeline_snapshot.last_error_active as string | null) || "—"}
                   </dd>
                 </div>
                 <div>
@@ -202,6 +202,50 @@ export default function DashboardPage() {
                   </dd>
                 </div>
               </dl>
+              {(() => {
+                const snap = worker.admin_pipeline_snapshot;
+                const last = snap.counts as Record<string, number> | null | undefined;
+                const curr = snap.current_counts as Record<string, number> | null | undefined;
+                if (!last && !curr) return null;
+                const rows: Array<{ label: string; key: string }> = [
+                  { label: "Raw collected", key: "raw_collected" },
+                  { label: "Step 1 kept", key: "step1_kept" },
+                  { label: "Step 2 matched", key: "step2_matched" },
+                  { label: "Step 3 scored", key: "step3_scored" },
+                  { label: "Step 4 saved", key: "step4_saved" },
+                  { label: "Alerts sent", key: "alerts_sent" },
+                ];
+                return (
+                  <div className="mt-3 overflow-hidden rounded-lg border border-zinc-800">
+                    <table className="w-full text-[10px] text-zinc-400">
+                      <thead>
+                        <tr className="border-b border-zinc-800 bg-zinc-900/60">
+                          <th className="py-1.5 pl-3 pr-2 text-left font-normal text-zinc-600">Batch step</th>
+                          <th className="py-1.5 pr-3 text-right font-normal text-zinc-500">
+                            Last completed
+                          </th>
+                          <th className="py-1.5 pr-3 text-right font-normal text-zinc-500">
+                            In progress
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map(({ label, key }) => (
+                          <tr key={key} className="border-b border-zinc-800/50 last:border-0">
+                            <td className="py-1 pl-3 pr-2 text-zinc-500">{label}</td>
+                            <td className="py-1 pr-3 text-right font-mono text-zinc-300">
+                              {last?.[key] ?? "—"}
+                            </td>
+                            <td className="py-1 pr-3 text-right font-mono text-zinc-400">
+                              {curr?.[key] ?? "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
               <details className="mt-3">
                 <summary className="cursor-pointer text-[11px] text-violet-300/90">Raw JSON</summary>
                 <pre className="mt-2 max-h-48 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950/80 p-3 text-[10px] leading-relaxed text-zinc-500">
