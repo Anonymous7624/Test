@@ -190,7 +190,7 @@ def _begin_listing_collection(
     s.worker_last_batch_started_at = now
     s.worker_current_step = 1
     s.worker_current_state = "collecting_listings"
-    s.worker_pipeline_message = "Step 1: Looking for listings"
+    s.worker_pipeline_message = "Step 1: Collecting listings"
     s.worker_pipeline_error = None
     s.worker_collector_warning = None
     # New batch — drop prior collector failure snapshot so the UI is not stuck on an old run.
@@ -206,7 +206,7 @@ def _begin_listing_collection(
     category = getattr(s, "marketplace_category_slug", None) or getattr(s, "marketplace_category_label", None)
     keywords = getattr(s, "custom_keywords", None) or []
     logger.info(
-        "Batch started: user_id=%s backfill=%s stage=collect_listings "
+        "Batch step 1 start (collect): user_id=%s backfill=%s "
         "search_mode=%s category=%r keywords=%r mock_collector=%s",
         s.user_id,
         backfill,
@@ -347,8 +347,25 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
             collector_meta=collector_meta,
             prior_collector_failure_message=prior_collector_failure,
         )
+        logger.info(
+            "Batch step 1 done (collect): user_id=%s raw_count=%s — starting pipeline",
+            s.user_id,
+            len(raws),
+        )
+        # Refresh heartbeat before entering the pipeline (collection may take a while).
+        _update_heartbeat(db)
         if raws:
             stats = process_batch(db, raws, profile=s, origin_type="backfill")
+            logger.info(
+                "Batch pipeline done: user_id=%s backfill=True "
+                "collected=%s kept=%s matched=%s saved=%s alerts=%s",
+                s.user_id,
+                stats.raw_collected,
+                stats.step1_kept,
+                stats.step2_matched,
+                stats.step4_saved,
+                stats.alerts_sent,
+            )
             print(
                 f"[user={s.user_id}] backfill batch: saved={stats.step4_saved} alerts_sent={stats.alerts_sent}",
                 flush=True,
@@ -358,10 +375,11 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
             _persist_empty_cycle_last_completed(s)
             s.worker_current_step = 0
             s.worker_current_state = "no_listings_this_cycle"
-            s.worker_pipeline_message = "Step 1: No listings returned this cycle"
+            s.worker_pipeline_message = "No listings found this cycle"
             s.worker_pipeline_error = None
             s.worker_last_success_at = now
             repo.replace_settings(s)
+            logger.info("Batch done (empty): user_id=%s backfill=True — no listings this cycle", s.user_id)
         s.backfill_complete = True
         s.monitoring_state = "polling"
         s.last_checked_at = now
@@ -420,9 +438,26 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
         collector_meta=collector_meta,
         prior_collector_failure_message=prior_collector_failure,
     )
+    logger.info(
+        "Batch step 1 done (collect): user_id=%s raw_count=%s — starting pipeline",
+        s.user_id,
+        len(raws),
+    )
+    # Refresh heartbeat before entering the pipeline (collection may take a while).
+    _update_heartbeat(db)
     if raws:
         stats = process_batch(db, raws, profile=s, origin_type="live")
         screen = collector_meta.get("screen_summary") or {}
+        logger.info(
+            "Batch pipeline done: user_id=%s backfill=False "
+            "collected=%s kept=%s matched=%s saved=%s alerts=%s",
+            s.user_id,
+            stats.raw_collected,
+            stats.step1_kept,
+            stats.step2_matched,
+            stats.step4_saved,
+            stats.alerts_sent,
+        )
         print(
             f"[user={s.user_id}] live batch: "
             f"collected={screen.get('collected_from_page', len(raws))} "
@@ -431,7 +466,7 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
             f"pre_enrich_dupes={screen.get('pre_enrich_known_dupes', 0)} "
             f"detail_enriched={screen.get('detail_enriched_ok', 0)} "
             f"passed_to_pipeline={len(raws)} "
-            f"step2_matched={stats.step2_matched} "
+            f"step3_matched={stats.step2_matched} "
             f"saved={stats.step4_saved} "
             f"alerts_sent={stats.alerts_sent}",
             flush=True,
@@ -441,10 +476,11 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
         _persist_empty_cycle_last_completed(s)
         s.worker_current_step = 0
         s.worker_current_state = "no_listings_this_cycle"
-        s.worker_pipeline_message = "Step 1: No listings returned this cycle"
+        s.worker_pipeline_message = "No listings found this cycle"
         s.worker_pipeline_error = None
         s.worker_last_success_at = now
         repo.replace_settings(s)
+        logger.info("Batch done (empty): user_id=%s backfill=False — no listings this cycle", s.user_id)
     s.last_checked_at = now
     s.last_error = None
     repo.replace_settings(s)
@@ -479,12 +515,13 @@ async def tick() -> None:
         for doc in docs:
             s = settings_from_doc(doc)
             logger.info(
-                "Worker tick: picking up user_id=%s monitoring_state=%s "
-                "backfill_complete=%s search_mode=%s",
+                "Batch picked up: user_id=%s monitoring_state=%s "
+                "backfill_complete=%s search_mode=%s worker_current_state=%s",
                 s.user_id,
                 s.monitoring_state,
                 getattr(s, "backfill_complete", True),
                 getattr(s, "search_mode", "?"),
+                getattr(s, "worker_current_state", "—"),
             )
             try:
                 await _process_monitoring_user(db, s)

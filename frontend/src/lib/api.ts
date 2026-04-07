@@ -266,6 +266,11 @@ export type WorkerStatusPayload = {
    * (default 300 s). False means no worker is running or it stopped.
    */
   worker_is_alive?: boolean;
+  /**
+   * True while a batch is actively running (step 1–4). False when idle,
+   * batch_complete, no_listings_this_cycle, or errored.
+   */
+  batch_is_active?: boolean;
 };
 
 const WORKER_STATUS_FALLBACK: WorkerStatusPayload = {

@@ -43,6 +43,7 @@ export default function DashboardPage() {
   const isAdmin = user?.role === "admin";
   const pc = worker?.pipeline_counts;
   const cur = worker?.current_pipeline_counts;
+  const batchActive = Boolean(worker?.batch_is_active);
   const storedCount = worker?.listings_found_count ?? listings.length;
 
   // Show a warning if monitoring is active but the worker hasn't sent a recent heartbeat.
@@ -50,6 +51,27 @@ export default function DashboardPage() {
     statusOk &&
     Boolean(worker?.monitoring_enabled) &&
     worker?.worker_is_alive === false;
+
+  // Human-readable labels for pipeline stage states.
+  const STAGE_LABELS: Record<string, string> = {
+    collecting_listings: "Step 1 · Collecting listings",
+    step2_normalize: "Step 2 · Normalizing",
+    step3_match: "Step 3 · Matching filters",
+    step4_save_alert: "Step 4 · Saving & alerting",
+    batch_complete: "Batch complete",
+    no_listings_this_cycle: "No listings this cycle",
+    batch_interrupted: "Interrupted",
+    collector_error: "Collector error",
+    configuration_error: "Configuration error",
+    idle: "Idle",
+    starting: "Starting",
+  };
+
+  function formatStageLabel(step: number | undefined, state: string | undefined): string {
+    if (!state || state === "idle") return "Idle";
+    if (STAGE_LABELS[state]) return STAGE_LABELS[state];
+    return step != null && step > 0 ? `Step ${step} · ${state}` : state;
+  }
 
   return (
     <div>
@@ -103,19 +125,23 @@ export default function DashboardPage() {
           ) : null}
           {!workerNotRunning && worker?.pipeline_message && !worker?.configuration_error ? (
             <p className="mt-2 text-xs leading-snug text-zinc-400">
-              <span className="text-zinc-600">Live: </span>
+              <span className={batchActive ? "text-emerald-600" : "text-zinc-600"}>
+                {batchActive ? "Running: " : "Last: "}
+              </span>
               {worker.pipeline_message}
             </p>
           ) : null}
-          {cur ? (
+          {batchActive && cur ? (
             <div className="mt-2">
-              <p className="text-[10px] uppercase tracking-wide text-zinc-600">
-                Current batch (in progress)
+              <p className="text-[10px] uppercase tracking-wide text-emerald-700">
+                Active batch progress
               </p>
-              <p className="mt-1 font-mono text-[11px] text-zinc-500">
-                Raw {cur.raw_collected} · kept {cur.step1_kept} · matched {cur.step2_matched} · saved {cur.step4_saved} · alerts {cur.alerts_sent}
+              <p className="mt-1 font-mono text-[11px] text-zinc-400">
+                Collected {cur.raw_collected} · kept {cur.step1_kept} · matched {cur.step2_matched} · saved {cur.step4_saved} · alerts {cur.alerts_sent}
               </p>
             </div>
+          ) : worker?.monitoring_enabled && !batchActive ? (
+            <p className="mt-2 text-[11px] text-zinc-600 italic">No batch currently running</p>
           ) : null}
           {pc ? (
             <div className="mt-2">
@@ -123,7 +149,7 @@ export default function DashboardPage() {
                 Last completed batch
               </p>
               <p className="mt-1 font-mono text-[11px] text-zinc-500">
-                Raw {pc.raw_collected} · kept {pc.step1_kept} · matched {pc.step2_matched} · saved {pc.step4_saved} · alerts {pc.alerts_sent}
+                Collected {pc.raw_collected} · kept {pc.step1_kept} · matched {pc.step2_matched} · saved {pc.step4_saved} · alerts {pc.alerts_sent}
               </p>
             </div>
           ) : null}
@@ -152,7 +178,8 @@ export default function DashboardPage() {
           ) : null}
           {worker?.collector_warning ? (
             <p className="mt-2 rounded-md border border-amber-800/60 bg-amber-950/30 px-2 py-1.5 text-xs text-amber-100/95">
-              Collector: {worker.collector_warning}
+              <span className="font-medium text-amber-300">Collector warning (last batch) — </span>
+              {worker.collector_warning}
             </p>
           ) : null}
         </div>
@@ -186,8 +213,10 @@ export default function DashboardPage() {
                 <div>
                   <dt className="text-zinc-600">Stage</dt>
                   <dd className="font-mono text-zinc-300">
-                    step {(worker.admin_pipeline_snapshot.worker_current_step as number) ?? "—"} ·{" "}
-                    {String(worker.admin_pipeline_snapshot.worker_current_state ?? "—")}
+                    {formatStageLabel(
+                      worker.admin_pipeline_snapshot.worker_current_step as number | undefined,
+                      worker.admin_pipeline_snapshot.worker_current_state as string | undefined,
+                    )}
                   </dd>
                 </div>
                 <div>

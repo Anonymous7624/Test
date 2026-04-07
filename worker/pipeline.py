@@ -1,12 +1,12 @@
 """
-Step 1 → Step 2 → Step 3 (save + alert). AI scoring is bypassed; the pipeline runs entirely on
-rule-based filtering and heuristic profit estimates.
+Post-collection pipeline (steps 2–4). Called after main.py completes step 1 (collection).
 
-Step 1: normalize + light prefilter.
-Step 2: strict match + Mongo dedupe + quality gate (spam/signal checks).
-Step 3: persist to MongoDB, then send Telegram alert.
+Step 2: normalize + light prefilter  (state: step2_normalize, worker_current_step=2)
+Step 3: strict match + quality gate  (state: step3_match,     worker_current_step=3)
+Step 4: persist to MongoDB + alert   (state: step4_save_alert, worker_current_step=4)
+Done:   batch_complete               (state: batch_complete,   worker_current_step=0)
 
-AI scoring (Ollama / Step3ScoreResult) is intentionally removed from the active flow.
+AI scoring (Ollama) is intentionally removed from the active flow.
 The code is preserved in backend/app/services/ai_scoring.py and can be re-enabled later.
 """
 
@@ -164,12 +164,17 @@ def process_batch(
     """
     collection_inputs = build_collection_inputs(profile)
 
-    profile.worker_current_step = 1
-    profile.worker_current_state = "step1_normalize"
-    profile.worker_pipeline_message = "Step 1: Normalizing and prefiltering listings"
+    profile.worker_current_step = 2
+    profile.worker_current_state = "step2_normalize"
+    profile.worker_pipeline_message = "Step 2: Normalizing and prefiltering listings"
     profile.worker_pipeline_error = None
     profile.worker_configuration_error = None
     _flush_pipeline(db, profile)
+    logger.info(
+        "Batch step 2 start (normalize+prefilter): user_id=%s raw_count=%s",
+        profile.user_id,
+        len(raws),
+    )
 
     raw_collected = len(raws)
     candidates: list[CandidateListing] = []
@@ -194,13 +199,19 @@ def process_batch(
     step1_kept = len(candidates)
     profile.worker_count_raw_collected = raw_collected
     profile.worker_count_step1_kept = step1_kept
-    profile.worker_current_step = 2
-    profile.worker_current_state = "step2_match"
+    profile.worker_current_step = 3
+    profile.worker_current_state = "step3_match"
     profile.worker_pipeline_message = (
-        f"Step 2: Filtering against user settings ({step1_kept} candidates after prefilter; "
-        f"{step1_prefilter_drop} dropped in step 1)"
+        f"Step 3: Matching against filters ({step1_kept} candidates; "
+        f"{step1_prefilter_drop} dropped in step 2)"
     )
     _flush_pipeline(db, profile)
+    logger.info(
+        "Batch step 3 start (match+quality gate): user_id=%s step2_kept=%s step2_prefilter_dropped=%s",
+        profile.user_id,
+        step1_kept,
+        step1_prefilter_drop,
+    )
 
     logger.debug(
         "Step 2 batch input: CandidateListing field names=%s",
@@ -266,16 +277,21 @@ def process_batch(
                 )
             continue
 
-    profile.worker_current_step = 3
-    profile.worker_current_state = "step3_save_alert"
+    profile.worker_current_step = 4
+    profile.worker_current_state = "step4_save_alert"
     profile.worker_count_step2_matched = step2_matched
     profile.worker_count_step3_scored = 0
     profile.worker_pipeline_step3_total = 0
     profile.worker_pipeline_step3_rank = 0
     profile.worker_pipeline_message = (
-        f"Step 3: Saving {len(matched_jobs)} matched listings and sending alerts"
+        f"Step 4: Saving {len(matched_jobs)} matched listings and sending alerts"
     )
     _flush_pipeline(db, profile)
+    logger.info(
+        "Batch step 4 start (save+alert): user_id=%s step3_matched=%s",
+        profile.user_id,
+        step2_matched,
+    )
 
     for idx, job in enumerate(matched_jobs):
         c = job.cand
@@ -294,7 +310,7 @@ def process_batch(
             tg_mode = normalize_telegram_alert_mode(getattr(profile, "telegram_alert_mode", None))
 
             profile.worker_pipeline_message = (
-                f"Step 3: saving {idx + 1}/{len(matched_jobs)} — {norm.title[:60]}"
+                f"Step 4: saving {idx + 1}/{len(matched_jobs)} — {norm.title[:60]}"
             )
             _flush_pipeline(db, profile)
 
@@ -447,18 +463,30 @@ def process_batch(
         step4_saved=step4_saved,
         alerts_sent=alerts_sent,
     )
+    # Snapshot the completed batch results into last_completed fields.
     _write_last_completed_snapshot(profile, stats)
-    profile.worker_count_raw_collected = stats.raw_collected
-    profile.worker_count_step1_kept = stats.step1_kept
-    profile.worker_count_step2_matched = stats.step2_matched
+    # Reset current (in-progress) counts to zero: the batch is done.
+    # last_completed fields now hold the summary; current counts reflect no active batch.
+    profile.worker_count_raw_collected = 0
+    profile.worker_count_step1_kept = 0
+    profile.worker_count_step2_matched = 0
     profile.worker_count_step3_scored = 0
-    profile.worker_count_step4_saved = stats.step4_saved
-    profile.worker_count_alerts_sent = stats.alerts_sent
+    profile.worker_count_step4_saved = 0
+    profile.worker_count_alerts_sent = 0
     profile.worker_pipeline_step3_rank = 0
     profile.worker_pipeline_step3_total = 0
     profile.worker_current_step = 0
     profile.worker_current_state = "batch_complete"
     profile.worker_last_success_at = datetime.utcnow()
+    logger.info(
+        "Batch complete: user_id=%s collected=%s step2_kept=%s step3_matched=%s step4_saved=%s alerts=%s",
+        profile.user_id,
+        stats.raw_collected,
+        stats.step1_kept,
+        stats.step2_matched,
+        stats.step4_saved,
+        stats.alerts_sent,
+    )
     if pipeline_candidate_errors:
         logger.warning(
             "Pipeline batch: %d candidate-level exception(s) across %d unique error pattern(s): %s",

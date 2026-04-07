@@ -23,6 +23,14 @@ router = APIRouter(prefix="/worker", tags=["worker"])
 # Must match (or be less than) WORKER_HEARTBEAT_STALE_SECONDS used by the worker.
 _HEARTBEAT_STALE_SECONDS = float(os.environ.get("WORKER_HEARTBEAT_STALE_SECONDS", "300"))
 
+# States that indicate an active in-progress batch (not idle, complete, or errored).
+_BATCH_ACTIVE_STATES = frozenset({
+    "collecting_listings",
+    "step2_normalize",
+    "step3_match",
+    "step4_save_alert",
+})
+
 
 def _read_worker_heartbeat(db: Database) -> tuple[datetime | None, bool]:
     """Return ``(last_ping_at, is_alive)``.
@@ -106,6 +114,9 @@ def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
 
     heartbeat_at, worker_alive = _read_worker_heartbeat(db)
 
+    current_state_str = str(getattr(s, "worker_current_state", None) or "idle")
+    batch_is_active = current_state_str in _BATCH_ACTIVE_STATES
+
     counts = _pipeline_counts_last_completed(s)
     current_counts = _pipeline_counts_current(s)
     rk = int(getattr(s, "worker_pipeline_step3_rank", 0) or 0)
@@ -159,6 +170,7 @@ def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
             "worker_last_heartbeat_at": _iso(heartbeat_at),
             "worker_is_alive": worker_alive,
             "worker_heartbeat_stale_seconds": _HEARTBEAT_STALE_SECONDS,
+            "batch_is_active": batch_is_active,
         }
 
     return WorkerStatus(
@@ -187,6 +199,7 @@ def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
         configuration_error=getattr(s, "worker_configuration_error", None),
         worker_last_heartbeat_at=heartbeat_at,
         worker_is_alive=worker_alive,
+        batch_is_active=batch_is_active,
     )
 
 

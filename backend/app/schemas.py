@@ -290,6 +290,13 @@ class WorkerStatus(BaseModel):
             "(default 300 s). False means no worker is running or it has been unreachable."
         ),
     )
+    batch_is_active: bool = Field(
+        default=False,
+        description=(
+            "True while a batch is actively running (step 1 collecting through step 4 saving). "
+            "False when idle, batch_complete, no_listings_this_cycle, or errored."
+        ),
+    )
 
 
 class TelegramVerificationStart(BaseModel):
