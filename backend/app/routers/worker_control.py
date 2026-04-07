@@ -1,3 +1,7 @@
+import logging
+import os
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pymongo.database import Database
 
@@ -11,7 +15,35 @@ from app.repositories.user_repository import UserRepository
 from app.schemas import PipelineCountsOut, WorkerStatus
 from app.services.monitoring_validation import readiness_errors
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/worker", tags=["worker"])
+
+# How many seconds since the last heartbeat before we consider the worker dead.
+# Must match (or be less than) WORKER_HEARTBEAT_STALE_SECONDS used by the worker.
+_HEARTBEAT_STALE_SECONDS = float(os.environ.get("WORKER_HEARTBEAT_STALE_SECONDS", "300"))
+
+
+def _read_worker_heartbeat(db: Database) -> tuple[datetime | None, bool]:
+    """Return ``(last_ping_at, is_alive)``.
+
+    ``is_alive`` is ``True`` when the worker wrote a heartbeat within the last
+    ``WORKER_HEARTBEAT_STALE_SECONDS`` seconds.  Returns ``(None, False)`` if
+    the heartbeat document has never been written (worker never started) or if
+    a DB read error occurs.
+    """
+    try:
+        doc = db["worker_meta"].find_one({"_id": "heartbeat"})
+        if not doc:
+            return None, False
+        last_ping = doc.get("last_ping_at")
+        if not isinstance(last_ping, datetime):
+            return None, False
+        age = (datetime.utcnow() - last_ping).total_seconds()
+        return last_ping, age < _HEARTBEAT_STALE_SECONDS
+    except Exception as exc:
+        logger.warning("Could not read worker heartbeat: %s", exc)
+        return None, False
 
 
 def _user_settings(db: Database, user: User):
@@ -72,6 +104,8 @@ def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
     if s.monitoring_enabled:
         state = (s.monitoring_state or "idle").strip() or "idle"
 
+    heartbeat_at, worker_alive = _read_worker_heartbeat(db)
+
     counts = _pipeline_counts_last_completed(s)
     current_counts = _pipeline_counts_current(s)
     rk = int(getattr(s, "worker_pipeline_step3_rank", 0) or 0)
@@ -122,6 +156,9 @@ def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
             "pipeline_step3_rank": step3_rank_out,
             "pipeline_step3_total": step3_total_out,
             "stored_listings_count": listings_n,
+            "worker_last_heartbeat_at": _iso(heartbeat_at),
+            "worker_is_alive": worker_alive,
+            "worker_heartbeat_stale_seconds": _HEARTBEAT_STALE_SECONDS,
         }
 
     return WorkerStatus(
@@ -148,6 +185,8 @@ def _worker_status_payload(db: Database, user: User) -> WorkerStatus:
         admin_pipeline_snapshot=admin_snap,
         collector_warning=getattr(s, "worker_collector_warning", None),
         configuration_error=getattr(s, "worker_configuration_error", None),
+        worker_last_heartbeat_at=heartbeat_at,
+        worker_is_alive=worker_alive,
     )
 
 
@@ -176,6 +215,10 @@ def run_monitoring(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"errors": errors},
         )
+    logger.info(
+        "Start monitoring requested: user_id=%s — writing monitoring_state=starting to DB",
+        user.id,
+    )
     s.monitoring_enabled = True
     s.monitoring_state = "starting"
     s.backfill_complete = False
@@ -189,7 +232,21 @@ def run_monitoring(
     s.worker_current_state = "starting"
     s.worker_pipeline_message = "Monitoring requested — waiting for worker to pick up."
     repo.replace_settings(s)
-    return _worker_status_payload(db, user)
+    logger.info(
+        "DB updated to starting for user_id=%s — worker must be running separately to pick this up",
+        user.id,
+    )
+    payload = _worker_status_payload(db, user)
+    if not payload.worker_is_alive:
+        logger.warning(
+            "Start monitoring: user_id=%s — no recent worker heartbeat "
+            "(last_heartbeat=%s stale_threshold=%ss). "
+            "Worker may not be running. Start it with: python worker/main.py",
+            user.id,
+            payload.worker_last_heartbeat_at,
+            _HEARTBEAT_STALE_SECONDS,
+        )
+    return payload
 
 
 @router.post("/stop", response_model=WorkerStatus)

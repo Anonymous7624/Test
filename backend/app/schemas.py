@@ -279,6 +279,17 @@ class WorkerStatus(BaseModel):
         default=None,
         description="Invalid search settings (not a collector/browser failure); clear when settings are fixed and a batch succeeds.",
     )
+    worker_last_heartbeat_at: UTCDatetime | None = Field(
+        default=None,
+        description="UTC timestamp of the last worker liveness ping (updated at the start of every poll tick).",
+    )
+    worker_is_alive: bool = Field(
+        default=False,
+        description=(
+            "True when the worker wrote a heartbeat within WORKER_HEARTBEAT_STALE_SECONDS "
+            "(default 300 s). False means no worker is running or it has been unreachable."
+        ),
+    )
 
 
 class TelegramVerificationStart(BaseModel):

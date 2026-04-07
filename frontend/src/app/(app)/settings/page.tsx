@@ -197,6 +197,16 @@ export default function SettingsPage() {
   const workerBusy = settings.monitoring_enabled && MONITORING_BUSY_STATES.has(msLive);
   const canRun = (readiness?.ready ?? false) && !settings.monitoring_enabled;
 
+  // Detect worker-not-running: monitoring is active/starting but no recent heartbeat.
+  const workerAlive = worker?.worker_is_alive === true;
+  const workerNotRunning =
+    settings.monitoring_enabled &&
+    !worker?.status_fetch_error &&
+    !workerAlive;
+  const lastHeartbeat = worker?.worker_last_heartbeat_at
+    ? new Date(worker.worker_last_heartbeat_at).toLocaleString()
+    : null;
+
   let runDisabledReason: string | null = null;
   if (!readiness) runDisabledReason = "Loading readiness…";
   else if (settings.monitoring_enabled) runDisabledReason = "Stop monitoring before starting again.";
@@ -294,7 +304,31 @@ export default function SettingsPage() {
               Cannot fetch worker status: {worker.status_fetch_error}
             </p>
           ) : null}
-          {worker?.pipeline_message && !worker?.configuration_error ? (
+
+          {workerNotRunning ? (
+            <div className="mt-3 rounded-lg border border-red-900/60 bg-red-950/30 px-3 py-3 text-xs">
+              <p className="font-medium text-red-200">Worker is not running</p>
+              <p className="mt-1 text-red-100/80">
+                Monitoring is{" "}
+                <span className="font-mono">{msLive.toUpperCase()}</span> in the
+                database, but no recent worker heartbeat was received. The worker
+                process must be started separately — it will not auto-launch from
+                the UI.
+              </p>
+              <p className="mt-2 font-mono text-[11px] text-zinc-400 select-all">
+                python worker/main.py
+              </p>
+              <p className="mt-1 text-[11px] text-zinc-500">
+                Run from the repository root. See README for PYTHONPATH / venv
+                setup.
+                {lastHeartbeat
+                  ? ` Last heartbeat: ${lastHeartbeat}.`
+                  : " No heartbeat received yet (worker has never connected to this DB)."}
+              </p>
+            </div>
+          ) : null}
+
+          {!workerNotRunning && worker?.pipeline_message && !worker?.configuration_error ? (
             <p className="mt-2 text-xs text-zinc-400">
               <span className="text-zinc-500">Pipeline: </span>
               {worker.pipeline_message}

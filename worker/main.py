@@ -15,6 +15,15 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# Heartbeat stale threshold (seconds).
+# The worker writes a liveness ping before each tick; the API uses this
+# to determine whether the worker process is actually running.
+# Must be > max expected tick duration + poll interval.
+# Default: 300 s (5 min). Override with WORKER_HEARTBEAT_STALE_SECONDS.
+# ---------------------------------------------------------------------------
+_HEARTBEAT_STALE_SECONDS = float(os.environ.get("WORKER_HEARTBEAT_STALE_SECONDS", "300"))
+
 # Resolve backend app package and worker directory on sys.path
 _ROOT = Path(__file__).resolve().parent
 _REPO = _ROOT.parent
@@ -40,6 +49,27 @@ from search_context import build_collection_inputs  # noqa: E402
 from search_plan import SearchPlanInvalidError, validate_search_plan_for_step1  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+
+def _update_heartbeat(db) -> None:
+    """Write a global liveness ping to ``worker_meta`` so the API can detect whether
+    the worker process is actually running.  Failures are non-fatal — the worker
+    continues even if the heartbeat write fails (e.g. transient network blip).
+    """
+    try:
+        db["worker_meta"].update_one(
+            {"_id": "heartbeat"},
+            {
+                "$set": {
+                    "last_ping_at": datetime.utcnow(),
+                    "pid": os.getpid(),
+                },
+                "$setOnInsert": {"first_seen_at": datetime.utcnow()},
+            },
+            upsert=True,
+        )
+    except Exception as exc:
+        logger.warning("Could not update worker heartbeat: %s", exc)
 
 
 def _mock_collector_enabled() -> bool:
@@ -427,6 +457,16 @@ async def _process_monitoring_user(db: Database, s: UserSettingsRow) -> None:
 
 async def tick() -> None:
     db: Database = get_database()
+    now_tick = datetime.utcnow()
+    logger.info(
+        "Worker tick started at %s UTC — mongodb=%r db=%r",
+        now_tick.strftime("%Y-%m-%d %H:%M:%S"),
+        settings.mongodb_uri,
+        settings.mongodb_database,
+    )
+    # Update global liveness heartbeat BEFORE processing users so the API can
+    # tell the worker is alive even during a long Playwright collection.
+    _update_heartbeat(db)
     try:
         docs = list(db["user_settings"].find({"monitoring_enabled": True}))
         if not docs:
@@ -435,11 +475,12 @@ async def tick() -> None:
                 "nothing to do. Enable monitoring in Settings to start collecting."
             )
             return
-        logger.info("Worker tick: processing %s user(s) with monitoring enabled", len(docs))
+        logger.info("Worker tick: found %s user(s) with monitoring_enabled=True", len(docs))
         for doc in docs:
             s = settings_from_doc(doc)
             logger.info(
-                "Worker tick: user_id=%s monitoring_state=%s backfill_complete=%s search_mode=%s",
+                "Worker tick: picking up user_id=%s monitoring_state=%s "
+                "backfill_complete=%s search_mode=%s",
                 s.user_id,
                 s.monitoring_state,
                 getattr(s, "backfill_complete", True),
@@ -454,6 +495,9 @@ async def tick() -> None:
                 UserRepository(db).replace_settings(s)
                 print(f"Worker user {s.user_id} error: {exc}", flush=True)
                 traceback.print_exc()
+            # Refresh heartbeat after each (potentially long) user tick so stale
+            # detection stays accurate when multiple users are being processed.
+            _update_heartbeat(db)
     finally:
         pass
 
@@ -472,9 +516,15 @@ async def main_loop() -> None:
 
     print("=" * 60, flush=True)
     print("Worker starting up", flush=True)
-    print(f"  MongoDB   : {settings.mongodb_uri!r} / db={settings.mongodb_database!r}", flush=True)
-    print(f"  Poll interval : {interval}s", flush=True)
+    print(f"  MongoDB URI  : {settings.mongodb_uri!r}", flush=True)
+    print(f"  MongoDB DB   : {settings.mongodb_database!r}", flush=True)
+    print(f"  Poll interval: {interval}s", flush=True)
+    print(f"  Heartbeat stale threshold: {_HEARTBEAT_STALE_SECONDS}s "
+          f"(WORKER_HEARTBEAT_STALE_SECONDS)", flush=True)
     print(f"  Mock collector: {mock_mode} (set WORKER_MOCK_COLLECTOR=1 to enable)", flush=True)
+    # Write startup heartbeat immediately so the API can detect this worker within seconds.
+    _update_heartbeat(db)
+    print(f"  Heartbeat written to worker_meta collection (pid={os.getpid()})", flush=True)
     if not mock_mode:
         try:
             from collector.playwright_collector import facebook_auth_state_path  # noqa: PLC0415

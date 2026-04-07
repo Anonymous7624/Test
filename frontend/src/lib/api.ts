@@ -255,6 +255,17 @@ export type WorkerStatusPayload = {
   status_fetch_error?: string;
   /** Snapshot when the previous batch finished; not the in-progress row. */
   pipeline_counts_scope?: string;
+  /**
+   * UTC timestamp of the last worker liveness ping.
+   * Updated at the start of every poll tick by the worker process.
+   * Null when the worker has never been started.
+   */
+  worker_last_heartbeat_at?: string | null;
+  /**
+   * True when the worker wrote a heartbeat within the stale threshold
+   * (default 300 s). False means no worker is running or it stopped.
+   */
+  worker_is_alive?: boolean;
 };
 
 const WORKER_STATUS_FALLBACK: WorkerStatusPayload = {
