@@ -312,6 +312,14 @@ def _extract_listing_location_from_card_text(
     if primary and parsed.strip().lower() == primary.lower():
         return primary, None
 
+    # Only promote to loc_parsed when the text is a plausible location string.
+    # Junk / product text that slipped through the heuristics above (e.g.
+    # "3 savedMark as read", "Price dropped", product model numbers) is
+    # discarded here so it never reaches the early location screen as a fake
+    # "location" and incorrectly rejects a good listing.
+    if not _is_valid_visible_location(parsed):
+        return primary, None
+
     return parsed.strip(), parsed.strip()
 
 
@@ -319,20 +327,27 @@ def _early_location_screen(
     items: list[RawListing],
     *,
     collection_inputs: CollectionInputs,
+    category_feed_mode: bool = False,
 ) -> tuple[list[RawListing], int, int]:
     """
     Pre-enrichment location filter using only text visible on the card.
 
-    Only rejects when ``listing_location_parsed`` is set (a real location was parsed from the
-    card text) AND that location clearly fails the same text-based radius check that Step 2 would
-    apply.  Listings with no parsed card location (``listing_location_parsed=None``) are passed
-    through — their ``location`` field is the primary-search fallback, so there is no independent
-    signal to reject on.
+    Rejects a listing early **only** when all three conditions hold:
 
-    Cards that were clearly outside the radius are skipped from detail-page enrichment entirely,
-    saving one browser page-visit per rejected card.
+    1. ``listing_location_parsed`` is set and passes ``_is_valid_visible_location``
+       (i.e. it is a real city/region string, not UI chrome or product text).
+    2. That location fails the text-based radius check (``listing_within_user_radius``).
+    3. In ``category_feed_mode`` the location must additionally match the
+       high-confidence ``'City, ST'`` pattern — because Facebook's own
+       location/radius UI filter has already been applied, so the card-level
+       text is only a secondary hint and should not override that filter unless
+       it is unambiguous.
 
-    Returns ``(passed_items, early_rejected_count, unknown_location_count)``.
+    Any listing whose parsed location is missing, malformed, or junk text is
+    passed through as "unknown" — it continues to detail-page enrichment where
+    the full listing page can be inspected.
+
+    Returns ``(passed_items, early_rejected_count, unknown_or_skipped_count)``.
     """
     # Lazy import: backend/ is added to sys.path by main.py before this is ever called.
     from app.services.geo_filter import listing_within_user_radius  # noqa: PLC0415
@@ -343,10 +358,40 @@ def _early_location_screen(
 
     for raw in items:
         parsed_loc = (raw.listing_location_parsed or "").strip()
+
         if not parsed_loc:
-            # Location fell back to the primary-search region — can't distinguish; pass through.
+            # No distinct card location parsed — use primary-search fallback; pass through.
             unknown += 1
             passed.append(raw)
+            continue
+
+        # Belt-and-suspenders guard: reject any junk text that slipped through
+        # _extract_listing_location_from_card_text.  Log at DEBUG so logs are not noisy.
+        if not _is_valid_visible_location(parsed_loc):
+            unknown += 1
+            passed.append(raw)
+            logger.debug(
+                "Step 1 loc-screen user_id=%s card_location=%r "
+                "(malformed/junk text — ignored, listing passed through)",
+                collection_inputs.user_id,
+                parsed_loc,
+            )
+            continue
+
+        # In category_feed mode the Facebook UI radius filter already ran, so
+        # we only early-reject when we are *certain* the card location is a
+        # real city outside the radius.  Require the high-confidence
+        # "City, ST" pattern; anything less specific is passed through.
+        if category_feed_mode and not _is_high_confidence_city_state(parsed_loc):
+            unknown += 1
+            passed.append(raw)
+            logger.debug(
+                "Step 1 loc-screen user_id=%s card_location=%r "
+                "(category_feed: low-confidence location — passed through; "
+                "UI radius filter already applied)",
+                collection_inputs.user_id,
+                parsed_loc,
+            )
             continue
 
         within = listing_within_user_radius(
@@ -365,7 +410,7 @@ def _early_location_screen(
             rejected += 1
             logger.info(
                 "Step 1 early-loc-reject user_id=%s card_location=%r "
-                "(outside radius — detail-enrich skipped)",
+                "(valid location, confirmed outside radius — detail-enrich skipped)",
                 collection_inputs.user_id,
                 parsed_loc,
             )
@@ -376,6 +421,8 @@ def _early_location_screen(
 def _quick_location_reject_count(
     batch: list[RawListing],
     collection_inputs: CollectionInputs,
+    *,
+    category_feed_mode: bool = False,
 ) -> int:
     """
     Count how many cards in ``batch`` would fail the early location screen without logging each one.
@@ -383,6 +430,9 @@ def _quick_location_reject_count(
     Used for the adaptive scroll-stop heuristic: if a whole scroll round produces only
     out-of-radius cards, continuing to scroll will likely produce more of the same, so we
     stop early.  Returns 0 when no parsed card locations are present (unknown ≠ rejected).
+
+    Applies the same validity guards as ``_early_location_screen`` so junk text
+    does not inflate the reject count and trigger a premature scroll-stop.
     """
     # Lazy import; backend/ is on sys.path before this is ever called.
     from app.services.geo_filter import listing_within_user_radius  # noqa: PLC0415
@@ -391,7 +441,13 @@ def _quick_location_reject_count(
     for raw in batch:
         parsed_loc = (raw.listing_location_parsed or "").strip()
         if not parsed_loc:
-            continue  # unknown location — cannot reject on card text alone
+            continue  # unknown — cannot reject on card text alone
+        # Skip junk text — it would not be rejected by _early_location_screen either.
+        if not _is_valid_visible_location(parsed_loc):
+            continue
+        # In category_feed mode only high-confidence "City, ST" triggers early rejection.
+        if category_feed_mode and not _is_high_confidence_city_state(parsed_loc):
+            continue
         within = listing_within_user_radius(
             user_lat=collection_inputs.center_lat,
             user_lon=collection_inputs.center_lon,
@@ -568,6 +624,97 @@ _JUNK_SUFFIX_RE = re.compile(
     r"(?:\s*[\u00b7·]\s*\d+[hdwm]|\s*\.\s*\d+[hdwm]|\s*\d+[hdwm])?(?:\s*Mark\s+as\s+read)?$",
     re.I,
 )
+
+# ── Visible-location validation ──────────────────────────────────────────────
+
+# UI/notification strings that are never a real location.
+# Covers the patterns seen in logs: "Price dropped", "Mark as read",
+# "savedMark as read", "New message", "Message seller", etc.
+_LOC_JUNK_RE = re.compile(
+    r"(?:"
+    r"\bprice\s+drop(?:ped)?\b"           # "Price dropped"
+    r"|\bmark\s+as\s+read\b"              # "Mark as read"
+    r"|\bsaved\s*mark\b"                  # "savedMark" (concatenated UI chrome)
+    r"|\bnew\s+message\b"                 # "New message"
+    r"|\bmessage\s+(?:seller|the)\b"      # "Message seller"
+    r"|\bchat\s+with\b"                   # "Chat with seller"
+    r"|\bsend\s+(?:seller|a)\b"           # "Send seller a message"
+    r"|\bsee\s+more\b"                    # "See more"
+    r"|\bsponsored\b"                     # "Sponsored"
+    r"|\btoday[''`\u2019]?s\s+picks?\b"   # "Today's picks"
+    r"|\bunread\b"                        # "Unread"
+    r")",
+    re.I,
+)
+
+# Product-code tokens: uppercase+digit combos, hyphenated SKUs.
+# e.g. "256GB", "SV3Z-7W", "A1234B"  (state abbrevs like "NY" do NOT match).
+_LOC_PRODUCT_CODE_RE = re.compile(
+    r"\b(?:[A-Z]{2,}\d+|\d+[A-Z]{2,}|[A-Z0-9]{3,}-[A-Z0-9]+)\b"
+)
+
+# Valid location shape: only letters / spaces / hyphens / apostrophes / dots.
+# No digits — real US city names on Marketplace don't contain numerals.
+# Optionally followed by ", State" (full name or 2–30-char abbreviation).
+_VALID_LOC_SHAPE_RE = re.compile(
+    r"^[A-Za-z][A-Za-z\s\-\'\.]{1,49}(?:,\s*[A-Za-z]{2,30})?\s*$"
+)
+
+# High-confidence: exactly "City, 2-letter-state" — e.g. "Bellmore, NY".
+_HIGH_CONF_CITY_STATE_RE = re.compile(
+    r"^[A-Za-z][A-Za-z\s\-\'\.]{1,39},\s*[A-Za-z]{2}\s*$"
+)
+
+
+def _is_valid_visible_location(text: str) -> bool:
+    """
+    Return True only when ``text`` is plausibly a real location string on a
+    Facebook Marketplace card (e.g. ``"Bellmore, NY"``, ``"Plainview, NY"``).
+
+    Rejects:
+    - UI chrome / notification text (``"3 savedMark as read"``, ``"Price dropped"``)
+    - Product names / model numbers (``"iphone 14 promax 256GB SV3Z-7W"``)
+    - Price or distance-only text
+    - Anything with a leading digit, product-code tokens, or junk keywords
+
+    This is intentionally conservative: when in doubt it returns False so
+    the listing passes through to detail-page enrichment rather than being
+    silently dropped by the early location screen.
+    """
+    s = (text or "").strip()
+    if len(s) < 3 or len(s) > 80:
+        return False
+    # Leading digit → notification badge or product model ("3 savedMark", "14 promax …")
+    if s[0].isdigit():
+        return False
+    # Price text
+    if s.startswith("$") or (_extract_price(s) is not None and "$" in s):
+        return False
+    # Distance-only line (e.g. "12 mi")
+    if _MI_DIST_ONLY.match(s):
+        return False
+    # Known junk / notification keyword patterns
+    if _LOC_JUNK_RE.search(s):
+        return False
+    # Product-code tokens (uppercase+digit combos, hyphenated SKUs)
+    if _LOC_PRODUCT_CODE_RE.search(s):
+        return False
+    # Must match the valid location shape (all letters/spaces — no digits)
+    if not _VALID_LOC_SHAPE_RE.match(s):
+        return False
+    return True
+
+
+def _is_high_confidence_city_state(text: str) -> bool:
+    """
+    Return True when ``text`` matches the high-confidence ``'City, ST'`` pattern
+    (two-letter US state abbreviation), e.g. ``"Bellmore, NY"``.
+
+    Used in ``category_feed`` mode where Facebook's UI radius filter has
+    already been applied — only this strong pattern justifies an early reject.
+    """
+    return bool(_HIGH_CONF_CITY_STATE_RE.match((text or "").strip()))
+
 
 # Section headings that mark the start of junk content on a detail page.
 # Everything after these headings is recommendation / sponsored / UI chrome.
@@ -833,14 +980,24 @@ async def _maybe_enrich_listings_from_detail_pages(
     max_n = _int_env("WORKER_COLLECTOR_DETAIL_ENRICH_MAX", 25)
 
     # ── Card-visible location pre-screen (before any detail-page browser visits) ──────────────
+    # In category_feed mode Facebook's UI location/radius filter has already run,
+    # so card-level location text is only a secondary hint.  Only high-confidence
+    # "City, ST" strings can trigger an early reject; everything else passes through.
+    _cat_feed = (
+        getattr(getattr(collection_inputs, "search_plan", None), "step1_collection_mode", None)
+        == "category_feed"
+    )
     screened, early_reject_n, unknown_n = _early_location_screen(
-        items, collection_inputs=collection_inputs
+        items,
+        collection_inputs=collection_inputs,
+        category_feed_mode=_cat_feed,
     )
     logger.info(
-        "Step 1 card-loc-screen user_id=%s: "
+        "Step 1 card-loc-screen user_id=%s mode=%s: "
         "collected_from_page=%s rejected_early_by_visible_location=%s "
         "unknown_location_passed=%s loc_screened_survivors=%s",
         user_id,
+        "category_feed" if _cat_feed else "keyword",
         len(items),
         early_reject_n,
         unknown_n,
@@ -1047,14 +1204,28 @@ async def _collect_marketplace_feed_for_query(
         # Adaptive early stop: if every new card this round has a parsed location AND all are
         # outside the user's radius, further scrolling will almost certainly produce more of the
         # same off-target results — stop now to save time.
+        # Use the same validity guards as _early_location_screen to avoid premature stops
+        # caused by junk text that was never going to trigger a real rejection anyway.
+        _feed_mode = (
+            getattr(getattr(collection_inputs, "search_plan", None), "step1_collection_mode", None)
+            == "category_feed"
+        )
         if (
             round_idx >= 1
             and new_this >= 3
             and len(out) >= 3
         ):
-            parsed_in_round = sum(1 for r in new_cards_this_round if (r.listing_location_parsed or "").strip())
+            parsed_in_round = sum(
+                1 for r in new_cards_this_round
+                if _is_valid_visible_location((r.listing_location_parsed or "").strip())
+                and (not _feed_mode or _is_high_confidence_city_state((r.listing_location_parsed or "").strip()))
+            )
             if parsed_in_round == new_this:
-                quick_rejects = _quick_location_reject_count(new_cards_this_round, collection_inputs)
+                quick_rejects = _quick_location_reject_count(
+                    new_cards_this_round,
+                    collection_inputs,
+                    category_feed_mode=_feed_mode,
+                )
                 if quick_rejects == new_this:
                     logger.info(
                         "Step 1 adaptive-stop query=%r round=%s: "
